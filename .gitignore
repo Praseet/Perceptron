@@ -1,0 +1,7 @@
+.env
+.venv/
+__pycache__/
+.ipynb_checkpoints/
+data/processed/
+models_artifacts/*.joblib   
+models_artifacts/isolation_forest_tier2.joblib
