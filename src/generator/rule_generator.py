@@ -313,8 +313,15 @@ except (ModuleNotFoundError, ImportError):
 # CHANGED: 768 -> 1536 for non-local. The fraud prompt now asks for 6-10 turns with
 # earned objection/resolution arcs instead of a fixed 4 short turns, which needs more
 # output budget per case than the old fixed-length format did.
+# CHANGED: local batch size 2 -> 1. Confirmed via a real run's logs that even
+# LLM_MAX_TOKENS=4096 was not enough for qwen3.5-4b to complete TWO full 6-10 turn
+# transcripts (with all required structured fields) in a single response -- every
+# batch of 2 was returning exactly 1 case, wasting the second half of every call as
+# an automatic under-return. One case per call removes that failure mode entirely:
+# each local call either completes its one case or it doesn't, with no risk of a
+# genuinely fine second case getting truncated by the first case eating the budget.
 LLM_IMPERSONATION_TARGET = 60
-LLM_BATCH_SIZE = int(os.getenv("LLM_BATCH_SIZE", "2"))
+LLM_BATCH_SIZE = int(os.getenv("LLM_BATCH_SIZE", "1" if os.getenv("USE_LOCAL", "").lower() == "true" else "2"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "4096" if os.getenv("USE_LOCAL", "").lower() == "true" else "1536"))
 
 def _batched(seq, size):
@@ -325,11 +332,19 @@ def _batched(seq, size):
 llm_user_ids = rng.choice(user_ids, size=min(LLM_IMPERSONATION_TARGET, N_USERS), replace=False)
 pending = [(int(u), rng.choice(PRETEXTS), new_case_id("ai_impersonation")) for u in llm_user_ids]
 
+n_llm_skipped = 0
 for batch in _batched(pending, LLM_BATCH_SIZE):
     pretext_case_pairs = [(pretext, case_id) for _, pretext, case_id in batch]
     batch_results = generate_llm_case_batch(pretext_case_pairs, max_tokens=LLM_MAX_TOKENS)
     for u, pretext, case_id in batch:
-        params = batch_results[case_id]
+        # CHANGED (was): batch_results[case_id] -- a bare KeyError the instant a case
+        # was rejected instead of fabricated. generate_llm_case_batch now only
+        # returns ACCEPTED cases, so a missing case_id here is an expected outcome
+        # (rejected by validation, not a bug) and must be skipped, not crash the run.
+        params = batch_results.get(case_id)
+        if params is None:
+            n_llm_skipped += 1
+            continue
         tx = materialize_llm_transaction(
             u, user_history[u], params, case_id, users, merchant_ids,
             cat_lookup, rng, new_tx_id, SIM_START, SIM_DAYS,
@@ -340,6 +355,9 @@ for batch in _batched(pending, LLM_BATCH_SIZE):
                 "case_id": case_id, "fraud_type": "ai_impersonation", "user_id": u,
                 "source": "llm", "pretext": pretext, **params,
             })
+
+if n_llm_skipped:
+    print(f"AI-impersonation: {n_llm_skipped}/{len(pending)} cases skipped (rejected by validation, see transcripts.jsonl rejection_reason).")
 
 # ---- 6. Benign transcripts (negative examples for the transcript classifier) ----
 # Doesn't touch fraud_rows or generation_log -- only writes to transcripts.jsonl,

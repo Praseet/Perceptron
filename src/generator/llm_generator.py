@@ -6,7 +6,6 @@ import logging
 import urllib.request
 from pathlib import Path
 from datetime import timedelta
-from google import genai
 import numpy as np
 from dotenv import load_dotenv
 
@@ -150,6 +149,34 @@ LOCAL_BENIGN_RESPONSE_FORMAT = {
 }
 
 
+# CHANGED (bugfix): the judge call (_judge_final_turn) needs a tiny {"matches": bool,
+# "reason": str} response, but it was calling call_structured() with no schema
+# argument at all -- which meant it silently inherited LOCAL_RESPONSE_FORMAT (the
+# FRAUD schema, requiring a "cases" array with a full 6-10 turn transcript) under
+# USE_LOCAL=true. LM Studio's strict json_schema mode cannot produce a
+# {"matches": ...} object while being told the schema requires "cases", so nearly
+# every judge call failed outright -- which is why validate_fraud_case's judge
+# fallback was rejecting good transcripts (~18/19 of all fraud rejections in one
+# observed run were exactly this failure, not real content problems). This gives the
+# judge its own minimal schema so it can actually succeed.
+LOCAL_JUDGE_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "outcome_judge_result",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "matches": {"type": "boolean"},
+                "reason": {"type": "string"},
+            },
+            "required": ["matches", "reason"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
 class LocalResponseError(ValueError):
     """A local-model response that retrying unchanged cannot repair."""
 
@@ -263,12 +290,22 @@ def _structured_openai(system, prompt, max_tokens, retries):
     return None
 
 
-def _structured_local(system, prompt, max_tokens, retries):
+def _structured_local(system, prompt, max_tokens, retries, response_format=None):
     # Qwen3-family models reason by default. In LM Studio that reasoning is returned
     # separately as `reasoning_content`; it can consume the entire token budget and
     # leave `message.content` empty. `/no_think` is the Qwen chat-template control
     # token for a non-reasoning response, which is the appropriate mode for this
     # bounded JSON-generation task.
+    # CHANGED (bugfix): response_format now defaults to the FRAUD schema only when the
+    # caller doesn't specify one, instead of _always_ reading the module-level
+    # LOCAL_RESPONSE_FORMAT global. Previously every local call -- fraud, benign, and
+    # judge alike -- was forced through LOCAL_FRAUD_RESPONSE_FORMAT (attacker/target
+    # speakers, 6-10 turns) because LOCAL_BENIGN_RESPONSE_FORMAT was defined but never
+    # actually wired to anything. That is why 100% of benign transcripts were coming
+    # back with attacker/target speakers repeated instead of alternating customer/agent
+    # turns, and failing validate_benign_case's turn-count/speaker check every time.
+    if response_format is None:
+        response_format = LOCAL_RESPONSE_FORMAT
     local_system = (
         system
         + "\n/no_think\nRespond with ONLY the JSON object, no markdown fences, no other text."
@@ -279,7 +316,7 @@ def _structured_local(system, prompt, max_tokens, retries):
         try:
             resp = _local_client.chat.completions.create(
                 model=LOCAL_MODEL, max_tokens=max_tokens, temperature=LOCAL_TEMPERATURE,
-                response_format=LOCAL_RESPONSE_FORMAT,
+                response_format=response_format,
                 messages=[{"role": "system", "content": local_system},
                           # This LM Studio Qwen3.5 template ignores the system-level
                           # control token, so repeat it as the final user instruction.
@@ -318,10 +355,19 @@ def _structured_local(system, prompt, max_tokens, retries):
     return None
 
 
-def call_structured(system: str, prompt: str, max_tokens: int = 2048, retries: int = 4):
-    """Returns a parsed dict, or None if every attempt failed (caller supplies the fallback)."""
+def call_structured(system: str, prompt: str, max_tokens: int = 2048, retries: int = 4,
+                     local_response_format=None):
+    """Returns a parsed dict, or None if every attempt failed (caller supplies the fallback).
+
+    local_response_format: only consumed by the "local" (LM Studio) provider, which is
+    the only path that requires a fixed JSON-schema object per call site. Gemini/
+    Anthropic/OpenAI paths use response_mime_type="application/json" or
+    response_format={"type": "json_object"} generically and don't need a schema
+    argument here. Defaults to the fraud schema (LOCAL_RESPONSE_FORMAT) inside
+    _structured_local when omitted, preserving prior behavior for existing callers
+    that don't pass this."""
     if ACTIVE_PROVIDER == "local":
-        return _structured_local(system, prompt, max_tokens, retries)
+        return _structured_local(system, prompt, max_tokens, retries, response_format=local_response_format)
     if ACTIVE_PROVIDER == "gemini":
         return _structured_gemini(system, prompt, max_tokens, retries)
     if ACTIVE_PROVIDER == "anthropic":
@@ -351,136 +397,464 @@ TARGET_PERSONAS = [
     "a skeptical person who pushes back hard and asks pointed verification questions",
 ]
 
+# CHANGED (was): BATCH_SYSTEM previously hard-coded "transaction_attempted MUST be
+# true for every generated case" and explicitly forbade refusal/hesitation endings.
+# That is what was diagnosed as the root cause of the LM Studio reasoning-budget
+# failure: a persona like "cautious ... gets suspicious quickly" pulls directly
+# against a mandatory-compliance instruction with zero valid escape outcome, so the
+# model has to reason its way through that contradiction on every single case before
+# it can commit to JSON -- which is exactly the multi-thousand-token internal debate
+# observed in the LM Studio log, ending in finish_reason='length' before any content
+# was emitted. The fix is state-conditioned generation: the OUTCOME is decided in
+# Python *before* the call (see _assign_outcomes below) and handed to the model as a
+# fact to dramatize, not a puzzle to solve. This removes the ambiguity the model was
+# spending its reasoning budget on, independent of any LM Studio setting.
+OUTCOME_STATES = [
+    "refused",
+    "deferred_for_verification",
+    "engaged_no_action",
+    "credential_shared",
+    "payment_attempted",
+    "payment_completed",
+]
+# Deliberately skewed toward outcomes useful to this project, not a claim about
+# real-world social-engineering success rates. Every state stays genuinely present.
+# Rebalance directly here if the accepted-case mix needs adjusting later.
+OUTCOME_WEIGHTS = [0.20, 0.15, 0.10, 0.15, 0.25, 0.15]
+
+OUTCOME_GUIDANCE = {
+    "refused": (
+        "The target must end the conversation by clearly refusing to comply -- e.g. "
+        "hanging up, stating they will not do this, or explicitly declining. No "
+        "money, credentials, or codes are shared. This is a valid, common, and "
+        "REQUIRED outcome for this case -- do not soften it into hesitation."
+    ),
+    "deferred_for_verification": (
+        "The target must end the conversation by declining to act NOW and instead "
+        "saying they will verify independently first -- e.g. 'I'll call the bank "
+        "directly' or 'I'll check this myself and call you back.' No money, "
+        "credentials, or codes are shared in this conversation."
+    ),
+    "engaged_no_action": (
+        "The target stays engaged, asks questions, may seem uncertain, but the "
+        "conversation ends WITHOUT the target taking any concrete action -- no "
+        "money sent, no credentials or codes given, no explicit refusal either. "
+        "The conversation simply ends inconclusively (e.g. gets cut off, target "
+        "says they need to think about it with no firm refusal or agreement)."
+    ),
+    "credential_shared": (
+        "The target ends the conversation by providing or clearly agreeing to "
+        "provide a password, PIN, one-time code, or similar authentication "
+        "information -- but does NOT explicitly send money or authorize a payment "
+        "in this conversation."
+    ),
+    "payment_attempted": (
+        "The target ends the conversation by clearly agreeing to send money, "
+        "authorize a payment, or make a transfer -- e.g. 'Okay, I'll make the "
+        "transfer now.' The conversation ends at the point of agreement/attempt; "
+        "it does not need to state the transfer definitely succeeded."
+    ),
+    "payment_completed": (
+        "The target ends the conversation by both agreeing to AND confirming "
+        "completion of a payment or transfer -- e.g. 'Okay, I've just sent it' or "
+        "'Done, the transfer went through.' The final message must show completed "
+        "action, not just intent."
+    ),
+}
+
 BATCH_SYSTEM = """You are a synthetic conversational data generator for an Authorized Push Payment (APP)
 fraud research benchmark.
 
-You will be given a list of (pretext, persona, case_id) triples.
+You will be given a list of (pretext, persona, assigned_outcome, case_id) quadruples.
 
-For EACH triple, generate one realistic synthetic scam conversation between:
+For EACH quadruple, generate one realistic synthetic scam conversation between:
 
 - Attacker: impersonating a bank, courier, technical support agent, family member,
-  investment representative, or another trusted authority.
-- Target: a victim matching the given persona.
+  investment representative, or another trusted authority, based on the given pretext.
+- Target: a victim whose reactions are consistent with the given persona.
 
-IMPORTANT:
-These cases are being generated specifically to create fraudulent TRANSACTION EVENTS.
+CRITICAL: each case has an assigned_outcome. The conversation's ending is NOT a free
+choice -- it is a fact you are dramatizing, not a decision you make. The persona
+describes HOW the target behaves along the way (how much they question, resist, or
+comply); the assigned_outcome describes WHERE the conversation ends. A skeptical
+persona assigned "refused" should refuse convincingly. A trusting persona assigned
+"payment_attempted" should comply in a way that fits their trust. Do not soften,
+hedge, or default to compliance regardless of what outcome was assigned -- every
+outcome listed below must appear when assigned, written as a genuine, natural ending
+for that specific persona.
 
-Therefore, the conversation MUST end with the target actually attempting or agreeing
-to perform the requested financial/security action.
+Outcome definitions (the final target turn must clearly match whichever is assigned):
 
-The target may initially hesitate, question the attacker, or express suspicion,
-but the attacker must successfully persuade the target by the end.
+- "refused": target clearly declines and ends the interaction. No money, credentials,
+  or codes shared.
+- "deferred_for_verification": target declines to act now and states they will
+  verify independently first (e.g. calling the bank directly). No money,
+  credentials, or codes shared.
+- "engaged_no_action": target stays engaged, may seem uncertain, but the
+  conversation ends with no concrete action taken and no firm refusal either.
+- "credential_shared": target provides or clearly agrees to provide a password,
+  PIN, one-time code, or similar credential, but does not send money or authorize a
+  payment in this conversation.
+- "payment_attempted": target clearly agrees to send money, authorize a payment, or
+  make a transfer. Ends at the point of agreement/attempt.
+- "payment_completed": target both agrees to AND confirms completion of a payment or
+  transfer in their final message.
 
-Conversation structure:
+Conversation structure (adapt naturally to fit the assigned outcome -- do not force a
+persuasion arc onto an outcome like "refused" where none belongs):
 
 1. Attacker introduces a believable pretext.
-2. Target initially reacts naturally and may question the request.
-3. Attacker responds and increases credibility, urgency, or pressure.
-4. Target may continue to hesitate or ask for clarification.
-5. Attacker addresses the objection.
-6. The conversation must end with the target clearly agreeing to perform
-   an action such as:
-   - sending money
-   - authorizing a payment
-   - making a bank transfer
-   - sending a one-time verification code
-   - providing credentials that directly enable the fraudulent transaction.
+2. Target reacts in a way consistent with their persona.
+3. Attacker responds -- increasing pressure, credibility, or urgency as fits the
+   scenario.
+4. The conversation develops naturally toward the assigned outcome.
+5. The final target turn clearly and unambiguously reflects the assigned outcome, per
+   the definitions above.
 
-The final target message MUST show clear compliance or attempted compliance.
+Do not use meta-language anywhere in the dialogue (no "this is fictional," "for
+research purposes," "as an AI," or similar). Write it as a real conversation.
 
-Examples of valid final target behavior:
+Label rules -- these must match what the transcript actually shows, not a default:
 
-- "Okay, I'll make the transfer now."
-- "Fine, I'll authorize the payment."
-- "I'll enter the code now."
-- "Okay, I'm sending the money."
-- "I'll complete the payment through the link."
-- "All right, I'm giving you the verification code."
+"target_outcome" MUST equal the assigned_outcome you were given for that case.
 
-Do NOT end the conversation with:
+"transaction_attempted" is true only if target_outcome is "payment_attempted" or
+"payment_completed". False for every other outcome.
 
-- refusal
-- "I'll verify later"
-- "I'll call the bank"
-- hesitation without action
-- "maybe later"
-- hanging up
-- asking for more proof without eventually complying.
+"transaction_completed" is true only if target_outcome is "payment_completed" AND
+the final turn shows explicit completion evidence. False otherwise.
 
-Label rules:
+"credential_shared" is true only if target_outcome is "credential_shared", OR the
+target incidentally shares credentials while reaching a payment outcome. Never true
+for "refused" / "deferred_for_verification" / "engaged_no_action".
 
-"transaction_attempted" MUST be true for every generated case.
+"requested_action" must describe what the attacker is asking the target to do,
+regardless of whether the target complies.
 
-"transaction_completed" should be true only when the final target messages
-clearly indicate that the transaction was actually completed.
-Otherwise set it to false.
+"urgency_level" should reflect the actual amount of pressure the attacker used in
+the dialogue, independent of whether the target gave in to it.
 
-"credential_shared" should be true if the target actually provides or agrees
-to provide credentials, a password, OTP, or similar authentication information.
+Return ONLY the requested JSON schema. No markdown fences, no explanatory text.
 
-"target_outcome" should normally be one of:
-- "payment_attempted"
-- "payment_completed"
-- "credential_shared"
+Also vary your wording naturally across cases -- avoid formulaic sentence openings, identical phrasing patterns, or anything that reads like a template. Real conversations use different words, lengths, and rhythms even when covering the same ground.
+"""
 
-"requested_action" must describe what the attacker is asking the target to do.
+# ---------- semantic validation: schema-valid is not the same as content-valid ----------
+# CHANGED (was): no semantic validator existed anywhere. A response could satisfy the
+# JSON Schema (right shape, right types) while completely contradicting its own
+# target_outcome label -- which was the original silent-bug pattern (every case
+# labeled as if compliant regardless of what the dialogue said). This checks the
+# *content* against the *label*, not just the JSON structure against the schema.
 
-"urgency_level" should reflect the actual amount of pressure used.
+REFUSAL_MARKERS = [
+    "no,", "i won't", "i will not", "not going to do that", "i refuse",
+    "i'm not comfortable", "i am not comfortable", "hanging up", "goodbye",
+    "not doing this", "absolutely not", "i don't think so",
+]
+DEFERRAL_MARKERS = [
+    "call the bank", "call the number on my card", "verify first", "verify independently",
+    "check this myself", "call you back", "i'll check", "i'll confirm", "call my bank",
+    # CHANGED: widened after real qwen3.5-4b output showed valid deferral phrasings
+    # this list didn't cover (e.g. "wait until tomorrow ... ask my daughter to
+    # verify"), causing genuine, well-written cases to be rejected as false
+    # negatives. See validate_fraud_case's judge-call fallback below for the
+    # general fix -- these additions are just the fast-path net getting wider too.
+    "wait until", "ask my", "double check", "check with", "confirm with",
+    "look into this myself", "reach out to", "contact them directly",
+    "check my bank app", "log in directly", "check for alerts myself",
+]
+PAYMENT_ATTEMPT_MARKERS = [
+    "i'll send", "i'll make the transfer", "i'll transfer", "i'll authorize",
+    "sending the money", "i'll pay", "okay, i'll", "i'll do it now", "making the payment",
+    "i'll complete the payment", "i'll wire", "sending it now", "i'll do the transfer",
+    "i'll go ahead and", "let me send", "i'll process the payment",
+]
+PAYMENT_COMPLETED_MARKERS = [
+    "i've sent", "i have sent", "it's done", "just sent", "went through",
+    "i've transferred", "i have transferred", "payment is complete", "i've paid",
+    "transfer is complete", "sent it", "it's sent", "all done", "just paid",
+    "money is on its way", "transfer went through",
+]
+CREDENTIAL_MARKERS = [
+    "here's my", "here is my", "the code is", "my password is", "my pin is",
+    "one-time code", "otp is", "i'll give you the code", "here's the code",
+    "the number is", "sending you the code", "here's my code",
+]
+META_LANGUAGE_MARKERS = [
+    "this is fictional", "for research purposes", "as an ai", "this is a simulation",
+    "hypothetical scenario", "this is just an example", "for training purposes",
+]
 
-Return ONLY the requested JSON schema.
+# ---------- adaptive fallback: an LLM judge for cases the keyword lists can't ----------
+# CHANGED: keyword matching alone proved too brittle against a live model's actual
+# range of phrasing -- real qwen3.5-4b output included valid, unambiguous outcome
+# evidence (e.g. "I'll wait until tomorrow ... ask my daughter to verify") that no
+# fixed phrase list will ever fully anticipate, causing good cases to be rejected as
+# false negatives (confirmed directly against a real generation log). Rather than
+# permanently chasing an ever-growing phrase list, the keyword lists now serve as a
+# FAST PASS (skip the extra call when there's a confident, unambiguous match) and an
+# LLM judge call is the fallback for anything the keyword lists don't confidently
+# resolve either way. This adapts to new phrasing automatically -- no manual list
+# maintenance required going forward.
+JUDGE_SYSTEM = """You are a strict validator for synthetic fraud-scenario transcripts.
+You will be given one conversation's final target turn, plus the outcome that turn is
+supposed to demonstrate. Decide whether the final turn CLEARLY and UNAMBIGUOUSLY
+demonstrates that specific outcome -- not a nearby or softer version of it.
+
+Outcome definitions:
+- "refused": target clearly declines and ends the interaction.
+- "deferred_for_verification": target declines to act now and will verify independently
+  first (any way of expressing "I'll check/confirm this through another channel before
+  doing anything" counts, however it's phrased).
+- "engaged_no_action": target stays engaged/uncertain but takes no concrete action and
+  does not firmly refuse either.
+- "credential_shared": target provides or clearly agrees to provide a password, PIN,
+  code, or similar credential.
+- "payment_attempted": target clearly agrees to send money, authorize a payment, or
+  make a transfer (agreement/attempt, not necessarily confirmed completion).
+- "payment_completed": target both agrees to AND confirms a payment or transfer is done.
+
+Return ONLY this JSON object, no markdown fences, no other text:
+{"matches": true or false, "reason": "one short sentence"}
 """
 
 
-def _fallback_case(pretext: str, case_id: str) -> dict:
+def _judge_final_turn(final_target_text: str, assigned_outcome: str) -> tuple[bool, str]:
+    """Fallback for cases the keyword fast-path can't confidently resolve. Makes one
+    small structured call (cheap: single short-answer JSON, no transcript generation)
+    asking whether the final turn matches the assigned outcome. On any call failure,
+    fails closed (treated as non-matching) -- an unreachable judge must never cause a
+    case to be silently accepted."""
+    prompt = (
+        f'assigned_outcome: "{assigned_outcome}"\n'
+        f'final target turn: "{final_target_text}"\n\n'
+        "Does this final turn clearly demonstrate the assigned outcome?"
+    )
+    result = call_structured(JUDGE_SYSTEM, prompt, max_tokens=150, retries=2,
+                              local_response_format=LOCAL_JUDGE_RESPONSE_FORMAT)
+    if result is None or "matches" not in result:
+        return False, "judge call failed or returned no usable response (failing closed)"
+    return bool(result["matches"]), str(result.get("reason", ""))
+
+
+def validate_fraud_case(case: dict, assigned_outcome: str, use_judge_fallback: bool = True) -> tuple[bool, str]:
+    """Checks a single parsed case against its assigned_outcome. Returns
+    (is_valid, reason). reason is empty on success, otherwise names the specific
+    failing check so rejection logs are actionable instead of a bare 'invalid'.
+
+    use_judge_fallback=True (default) means a keyword-list non-match falls through to
+    _judge_final_turn instead of an immediate rejection -- this is what makes
+    validation adapt to phrasing the fixed lists don't cover. Set False only for pure
+    offline/unit testing where no LLM call should happen."""
+    transcript = case.get("transcript")
+    if not isinstance(transcript, list):
+        return False, "transcript missing or not a list"
+    if len(transcript) > 10:
+        return False, f"transcript has too many turns ({len(transcript)} > 10)"
+
+    speakers = [t.get("speaker") for t in transcript]
+    if any(s not in ("attacker", "target") for s in speakers):
+        return False, f"transcript contains an unexpected speaker value: {speakers}"
+    for i in range(1, len(speakers)):
+        if speakers[i] == speakers[i - 1]:
+            return False, f"transcript speakers do not alternate at turn {i}"
+
+    full_text = " ".join(t.get("text", "") for t in transcript).lower()
+    for marker in META_LANGUAGE_MARKERS:
+        if marker in full_text:
+            return False, f"meta-language leakage detected ('{marker}')"
+
+    if case.get("target_outcome") != assigned_outcome:
+        return False, (
+            f"target_outcome '{case.get('target_outcome')}' does not match "
+            f"assigned outcome '{assigned_outcome}'"
+        )
+
+    # Only the FINAL target turn is authoritative for outcome evidence -- a
+    # conversation can dip through refusal-sounding language mid-way and still
+    # resolve to compliance (or vice versa), so checking any earlier turn would
+    # produce false rejections/acceptances on a perfectly valid transcript.
+    target_turns = [t for t in transcript if t.get("speaker") == "target"]
+    if not target_turns:
+        return False, "no target turns in transcript"
+    final_target_text = target_turns[-1].get("text", "").lower()
+
+    outcome_checks = {
+        "refused": REFUSAL_MARKERS,
+        "deferred_for_verification": DEFERRAL_MARKERS,
+        "credential_shared": CREDENTIAL_MARKERS,
+        "payment_attempted": PAYMENT_ATTEMPT_MARKERS,
+        "payment_completed": PAYMENT_COMPLETED_MARKERS,
+    }
+    if assigned_outcome in outcome_checks:
+        markers = outcome_checks[assigned_outcome]
+        keyword_match = any(m in final_target_text for m in markers)
+        if not keyword_match:
+            # CHANGED: a keyword miss no longer means an instant rejection. Fixed
+            # phrase lists can't keep pace with a generative model's actual range of
+            # wording (confirmed against real qwen3.5-4b output that used valid but
+            # unlisted phrasings). Fall through to the adaptive judge before
+            # rejecting -- this is what lets validation keep up with new phrasing
+            # without manual list maintenance every time a new failure surfaces.
+            if use_judge_fallback:
+                judge_match, judge_reason = _judge_final_turn(final_target_text, assigned_outcome)
+                if not judge_match:
+                    return False, (
+                        f"final target turn does not demonstrate '{assigned_outcome}' "
+                        f"(keyword fast-path missed, judge also rejected: {judge_reason})"
+                    )
+            else:
+                return False, (
+                    f"final target turn does not contain evidence matching "
+                    f"'{assigned_outcome}' (checked against {len(markers)} known phrasings, "
+                    f"judge fallback disabled)"
+                )
+    # "engaged_no_action" has no positive marker set by design -- a keyword hit for
+    # a DIFFERENT outcome is a signal, not an automatic rejection, since a stray
+    # matching phrase doesn't always mean the outcome is wrong in substance. The
+    # judge gets the final say when the fast-path signal is ambiguous.
+    else:
+        for other_outcome, markers in outcome_checks.items():
+            if any(m in final_target_text for m in markers):
+                if use_judge_fallback:
+                    judge_match, judge_reason = _judge_final_turn(final_target_text, "engaged_no_action")
+                    if not judge_match:
+                        return False, (
+                            f"assigned 'engaged_no_action' but final turn matches "
+                            f"'{other_outcome}' evidence and judge agrees it does not "
+                            f"demonstrate engaged_no_action: {judge_reason}"
+                        )
+                else:
+                    return False, (
+                        f"assigned 'engaged_no_action' but final turn matches "
+                        f"'{other_outcome}' evidence -- outcome label does not match content"
+                    )
+                break
+
+    expected_attempted = assigned_outcome in ("payment_attempted", "payment_completed")
+    if bool(case.get("transaction_attempted")) != expected_attempted:
+        return False, (
+            f"transaction_attempted={case.get('transaction_attempted')} inconsistent "
+            f"with outcome '{assigned_outcome}' (expected {expected_attempted})"
+        )
+
+    expected_completed = assigned_outcome == "payment_completed"
+    if bool(case.get("transaction_completed")) != expected_completed:
+        return False, (
+            f"transaction_completed={case.get('transaction_completed')} inconsistent "
+            f"with outcome '{assigned_outcome}' (expected {expected_completed})"
+        )
+
+    if case.get("transaction_completed") and not case.get("transaction_attempted"):
+        return False, "transaction_completed=True but transaction_attempted=False"
+
+    if assigned_outcome in ("refused", "deferred_for_verification", "engaged_no_action"):
+        if case.get("credential_shared"):
+            return False, f"credential_shared=True is invalid for outcome '{assigned_outcome}'"
+
+    return True, ""
+
+
+def _assign_outcomes(case_ids: list[str], rng_random=random) -> dict[str, str]:
+    """Picks one outcome state per case_id, weighted by OUTCOME_WEIGHTS. Returns a
+    dict of case_id -> outcome so the caller can pair it with the case's other
+    identifying fields before building the prompt."""
+    return {
+        cid: rng_random.choices(OUTCOME_STATES, weights=OUTCOME_WEIGHTS, k=1)[0]
+        for cid in case_ids
+    }
+
+
+def _fallback_case(pretext: str, case_id: str, assigned_outcome: str = "refused") -> dict:
+    """Used ONLY for the pre-generation placeholder shape when constructing a
+    rejection record -- never returned as if it were a real accepted case. A
+    rejected/failed case must never silently default to transaction_attempted=True;
+    that was the original fabrication bug. This placeholder is always
+    non-transacting regardless of assigned_outcome, since it exists to be logged as
+    rejected, not materialized."""
+    if pretext == "family emergency payment request":
+        victim = "Mom"
+        reason = "surgery deposit"
+    elif pretext == "courier delivery fee":
+        victim = "there"
+        reason = "customs handling"
+    else:
+        victim = "there"
+        reason = "account security"
     return {
         "case_id": case_id,
         "transcript": [
-            {"speaker": "attacker", "text": f"Urgent security notice regarding your account for {pretext}."},
-            {"speaker": "target", "text": "Wait, who is this? I wasn't expecting a call about that."},
+            {"speaker": "attacker", "text": f"Hello, this is regarding an urgent matter about {reason} on your account."},
+            {"speaker": "target", "text": f"Wait, who is this? I wasn't expecting a call about {pretext}."},
             {"speaker": "attacker", "text": "This is time-sensitive -- your account will be locked if we don't act now."},
             {"speaker": "target", "text": "I'm not comfortable doing this without verifying first. I'll call the number on my card."},
         ],
+        "target_outcome": "deferred_for_verification",
         "transaction_attempted": False,
+        "transaction_completed": False,
+        "credential_shared": False,
         "amount_multiplier": float(np.random.uniform(4.0, 9.0)),
         "urgency_level": "medium",
         "pretext_category": pretext,
     }
 
 
+def _call_batch_for_outcomes(system_prompt: str, quadruples: list[tuple[str, str, str, str]], max_tokens: int) -> dict:
+    """Factors out the repair-retry call shape shared by the main batch call and the
+    single-case repair retry: builds the prompt from (pretext, persona, outcome,
+    case_id) quadruples and returns the parsed response (or None on failure)."""
+    prompt_lines = "\n".join(
+        f"- pretext: '{p}', persona: '{persona}', assigned_outcome: '{o}', case_id: '{c}'"
+        for p, persona, o, c in quadruples
+    )
+    prompt = f"Generate one synthetic scam conversation for each of these cases:\n{prompt_lines}"
+    # Explicit rather than relying on _structured_local's implicit fraud-schema
+    # default -- every call site should now name its own schema so a future new
+    # call path can't silently inherit the wrong one the way benign/judge did.
+    return call_structured(system_prompt, prompt, max_tokens=max_tokens,
+                            local_response_format=LOCAL_FRAUD_RESPONSE_FORMAT)
+
+
 def generate_llm_case_batch(pretext_case_pairs, max_tokens: int | None = None):
     """
     Generates len(pretext_case_pairs) cases in a single API call instead of one call per
     case. pretext_case_pairs: list of (pretext, case_id) tuples.
-    Returns: dict of case_id -> params (same shape generate_llm_case used to return per-case).
-    Saves every case's transcript to transcripts.jsonl, same as before.
+    Returns: dict of case_id -> params for every ACCEPTED case only. A rejected or
+    unrecoverable case is simply absent from the returned dict -- callers must treat a
+    missing case_id as "skip this transaction," not assume every requested case_id is
+    present.
 
-    CHANGED: on total failure this logs the real error and marks every case in the batch
-    "fallback": true (as before) -- but now you'll actually see WHY in the console instead
-    of silently getting an all-placeholder dataset.
+    CHANGED: state-conditioned generation replaces forced-outcome generation. Each
+    case is assigned one of six outcome states in Python before the call
+    (_assign_outcomes), the LLM dramatizes that assigned state rather than choosing
+    freely, and every returned case is semantically validated (validate_fraud_case)
+    against its assigned outcome -- not just checked for JSON-schema validity. An
+    invalid case gets exactly one individual repair retry with the same assigned
+    outcome; if still invalid, it is logged with its specific rejection_reason and
+    excluded from the returned dict. This never fabricates a placeholder transaction
+    for a failed case -- rejection is a valid terminal state, not an error to paper
+    over with invented data.
     """
-    # 6-10 turn transcripts with 5 structured fields need more room than the old fixed
-    # 4-turn format did. 768 was sized for that shorter shape; 1536 gives headroom for
-    # a 3-case batch of the new longer transcripts without inflating local's budget
-    # (which already accounts for hidden reasoning separately).
+    # 6-10 turn transcripts with 5+ structured fields need more room than the old
+    # fixed 4-turn format did. LOCAL_MAX_TOKENS already accounts for hidden reasoning
+    # separately from this output budget.
     max_tokens = max_tokens if max_tokens is not None else (LOCAL_MAX_TOKENS if ACTIVE_PROVIDER == "local" else 1536)
-    prompt_pairs = "\n".join(
-        f"- pretext: '{p}', persona: '{random.choice(TARGET_PERSONAS)}', case_id: '{c}'"
-        for p, c in pretext_case_pairs
-    )
-    prompt = f"Generate one synthetic scam conversation for each of these cases:\n{prompt_pairs}"
 
-    parsed = call_structured(BATCH_SYSTEM, prompt, max_tokens=max_tokens)
+    case_ids = [c for _, c in pretext_case_pairs]
+    outcomes = _assign_outcomes(case_ids)
+    personas = {c: random.choice(TARGET_PERSONAS) for c in case_ids}
+    quadruples = [(p, personas[c], outcomes[c], c) for p, c in pretext_case_pairs]
+
+    parsed = _call_batch_for_outcomes(BATCH_SYSTEM, quadruples, max_tokens)
 
     model_name = {"gemini": GEMINI_MODEL, "anthropic": ANTHROPIC_MODEL, "openai": OPENAI_MODEL, "local": LOCAL_MODEL}[ACTIVE_PROVIDER]
     n_requested = len(pretext_case_pairs)
 
     if parsed is None or "cases" not in parsed:
-        # Hard failure: every retry raised. call_structured's own logging already
-        # explained why (rate limit, auth, etc).
         logger.error(
             "Batch of %d cases returned no usable response from %s (model=%s). "
             "See the WARNING lines above for the real exception. Every case in this "
-            "batch will be a placeholder.", n_requested, ACTIVE_PROVIDER, model_name,
+            "batch will be rejected and logged (not fabricated).", n_requested, ACTIVE_PROVIDER, model_name,
         )
         by_id = {}
     else:
@@ -508,25 +882,94 @@ def generate_llm_case_batch(pretext_case_pairs, max_tokens: int | None = None):
                 n_requested - n_returned, json.dumps(parsed)[:800],
             )
 
+    # CHANGED: validate every returned case against its assigned outcome. A case
+    # that fails validation gets exactly one individual repair retry (same assigned
+    # outcome, single-case call) -- if it's still invalid, it is REJECTED: logged
+    # with its specific reason and excluded from `results` entirely. It is never
+    # patched with a deterministic placeholder and never defaults
+    # transaction_attempted to True. `rule_generator.py`'s caller loop must treat a
+    # missing case_id in the returned dict as "skip this transaction."
     results = {}
+    n_accepted = 0
+    n_rejected = 0
     for pretext, case_id in pretext_case_pairs:
+        assigned_outcome = outcomes[case_id]
         case = by_id.get(case_id)
-        is_fallback_case = case is None
-        if is_fallback_case:
-            case = _fallback_case(pretext, case_id)
+
+        if case is None:
+            record = {
+                "case_id": case_id, "pretext": pretext, "transcript": "",
+                "accepted": False, "assigned_outcome": assigned_outcome,
+                "rejection_reason": "case_id absent from model response (batch under-return)",
+                "label": 1,
+            }
+            with TRANSCRIPT_PATH.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            n_rejected += 1
+            continue
+
+        is_valid, reason = validate_fraud_case(case, assigned_outcome)
+
+        if not is_valid:
+            # Single individual repair retry, same assigned outcome, single-case call.
+            logger.warning(
+                "Case %s failed validation (%s) -- attempting one repair retry.",
+                case_id, reason,
+            )
+            repair_quad = [(pretext, personas[case_id], assigned_outcome, case_id)]
+            repaired = _call_batch_for_outcomes(BATCH_SYSTEM, repair_quad, max_tokens)
+            repaired_case = None
+            if repaired and "cases" in repaired:
+                repaired_by_id = {c["case_id"]: c for c in repaired.get("cases", []) if "case_id" in c}
+                repaired_case = repaired_by_id.get(case_id)
+            if repaired_case is not None:
+                is_valid, reason = validate_fraud_case(repaired_case, assigned_outcome)
+                if is_valid:
+                    case = repaired_case
+
+        if not is_valid:
+            transcript_lines = [
+                f"{t.get('speaker','unknown')}: {t.get('text','')}"
+                for t in (case.get("transcript", []) if isinstance(case, dict) else [])
+            ]
+            record = {
+                "case_id": case_id, "pretext": pretext,
+                "transcript": "\n".join(transcript_lines),
+                "accepted": False, "assigned_outcome": assigned_outcome,
+                "rejection_reason": reason, "label": 1,
+            }
+            with TRANSCRIPT_PATH.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            logger.error("Case %s rejected after repair retry: %s", case_id, reason)
+            n_rejected += 1
+            continue
+
         transcript_lines = [f"{t.get('speaker','unknown')}: {t.get('text','')}" for t in case.get("transcript", [])]
         params = {
-            "transaction_attempted": bool(case.get("transaction_attempted", True)),
+            "transaction_attempted": bool(case.get("transaction_attempted", False)),
+            "transaction_completed": bool(case.get("transaction_completed", False)),
+            "credential_shared": bool(case.get("credential_shared", False)),
+            "target_outcome": str(case.get("target_outcome", assigned_outcome)),
             "amount_multiplier": float(case.get("amount_multiplier", np.random.uniform(4.0, 8.0))),
-            "urgency_level": str(case.get("urgency_level", "high")),
+            "urgency_level": str(case.get("urgency_level", "medium")),
             "pretext_category": str(case.get("pretext_category", pretext)),
-            "fallback": is_fallback_case,
+            "fallback": False,
             "label": 1,
         }
-        record = {"case_id": case_id, "pretext": pretext, "transcript": "\n".join(transcript_lines), **params}
+        record = {
+            "case_id": case_id, "pretext": pretext,
+            "transcript": "\n".join(transcript_lines),
+            "accepted": True, "assigned_outcome": assigned_outcome, **params,
+        }
         with TRANSCRIPT_PATH.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
         results[case_id] = params
+        n_accepted += 1
+
+    logger.info(
+        "Batch summary: %d/%d cases accepted, %d rejected.",
+        n_accepted, len(pretext_case_pairs), n_rejected,
+    )
 
     time.sleep(0.2)  # one sleep per BATCH, not per case
     return results
@@ -549,15 +992,13 @@ BENIGN_PRETEXTS = [
 
 BENIGN_BATCH_SYSTEM = """You are a synthetic conversational data generator for a customer-service benchmark.
 You will be given a list of (topic, case_id) pairs. For EACH pair, generate one realistic, ORDINARY support conversation
-between a Customer and an Agent about that topic -- no fraud, no urgency, no request to move money or share a one-time code.
-Return utterances per case in this order: customer, agent, customer, agent. Generate 6-8 utterances per case.
+between a Customer and an Agent about that topic -- no fraud, no urgency, no request to move money or share a one-time
+code, no impersonation, no persuasion arc, no escalating pressure. This is a routine, low-stakes support interaction:
+the customer asks a normal question, the agent answers it helpfully, and the conversation resolves without drama.
+Return exactly 4 utterances per case in this order: customer, agent, customer, agent.
 Each utterance should normally contain 8-20 words.
-Keep the conversation concise while preserving:
-1. believable pretext
-2. target hesitation
-3. attacker persuasion
-4. target compliance.
-Vary wording and tone across cases.
+Vary wording and tone across cases -- some customers are brief, some chatty, some slightly annoyed but never
+manipulated or pressured into anything.
 
 Return ONLY a JSON object with this exact schema -- a "cases" array with one entry per input pair, in the same order:
 {
@@ -574,12 +1015,48 @@ Return ONLY a JSON object with this exact schema -- a "cases" array with one ent
 """
 
 
+# CHANGED (was): the original prompt copy-pasted the fraud conversation's own shape
+# ("hesitation -> persuasion -> compliance") into the benign class's instructions,
+# which would teach a future transcript classifier the labels backwards -- the
+# supposedly-negative class was structurally identical to the positive class. These
+# markers catch that specific contamination pattern if it recurs.
+BENIGN_CONTAMINATION_MARKERS = [
+    "wire transfer", "one-time code", "verification code", "urgent", "immediately",
+    "account will be locked", "act now", "send money", "gift card", "crypto",
+    "password is", "pin is", "authorize the payment",
+]
+
+
+def validate_benign_case(case: dict) -> tuple[bool, str]:
+    """Checks a single parsed benign case for structural validity and absence of
+    fraud-shape contamination. Returns (is_valid, reason)."""
+    transcript = case.get("transcript")
+    if len(transcript) > 10:
+        return False, f"transcript has too many turns ({len(transcript)} > 10)"
+
+    speakers = [t.get("speaker") for t in transcript]
+    if speakers != ["customer", "agent", "customer", "agent"]:
+        return False, f"transcript speaker order must be customer/agent/customer/agent, got {speakers}"
+
+    full_text = " ".join(t.get("text", "") for t in transcript).lower()
+    for marker in META_LANGUAGE_MARKERS:
+        if marker in full_text:
+            return False, f"meta-language leakage detected ('{marker}')"
+    for marker in BENIGN_CONTAMINATION_MARKERS:
+        if marker in full_text:
+            return False, f"fraud-shape contamination detected ('{marker}') -- not a genuinely benign transcript"
+
+    return True, ""
+
+
 def _fallback_benign_case(topic: str, case_id: str) -> dict:
     return {
         "case_id": case_id,
         "transcript": [
             {"speaker": "customer", "text": f"Hi, I had a question about {topic}."},
             {"speaker": "agent", "text": "Sure, happy to help with that."},
+            {"speaker": "customer", "text": "That answers it, thanks."},
+            {"speaker": "agent", "text": "Glad I could help -- anything else?"},
         ],
     }
 
@@ -587,35 +1064,63 @@ def _fallback_benign_case(topic: str, case_id: str) -> dict:
 def generate_benign_case_batch(topic_case_pairs, max_tokens: int | None = None):
     """Batched version of generate_benign_case: one call for the whole batch. Writes
     directly to transcripts.jsonl (these don't feed generation_log.csv or fraud_rows,
-    same as the original)."""
+    same as the original).
+
+    CHANGED: every returned case is validated (validate_benign_case) for structure
+    and fraud-shape contamination before being accepted -- same reject-and-log
+    discipline as the fraud path, no silent fabrication."""
     max_tokens = max_tokens if max_tokens is not None else (LOCAL_MAX_TOKENS if ACTIVE_PROVIDER == "local" else 768)
     prompt_pairs = "\n".join(f"- topic: '{t}', case_id: '{c}'" for t, c in topic_case_pairs)
     prompt = f"Generate one ordinary customer-service conversation for each of these cases:\n{prompt_pairs}"
 
-    parsed = call_structured(BENIGN_BATCH_SYSTEM, prompt, max_tokens=max_tokens)
+    # CHANGED (bugfix): explicitly request the benign schema (customer/agent, exactly
+    # 4 turns) instead of silently inheriting the fraud schema through the old
+    # always-on LOCAL_RESPONSE_FORMAT global. See _structured_local's comment for the
+    # full failure mode this fixes.
+    parsed = call_structured(BENIGN_BATCH_SYSTEM, prompt, max_tokens=max_tokens,
+                              local_response_format=LOCAL_BENIGN_RESPONSE_FORMAT)
 
     if parsed is None or "cases" not in parsed:
         logger.error(
             "Benign batch of %d cases returned no usable response -- see WARNING lines "
-            "above for the real error. Using placeholder transcripts for this batch.",
-            len(topic_case_pairs),
+            "above for the real error. Every case in this batch will be rejected and "
+            "logged (not fabricated).", len(topic_case_pairs),
         )
-        by_id = {c: _fallback_benign_case(t, c) for t, c in topic_case_pairs}
-        is_fallback_batch = True
+        by_id = {}
     else:
         by_id = {case["case_id"]: case for case in parsed["cases"] if "case_id" in case}
-        for topic, case_id in topic_case_pairs:
-            if case_id not in by_id:
-                by_id[case_id] = _fallback_benign_case(topic, case_id)
-        is_fallback_batch = False
 
+    n_accepted = 0
+    n_rejected = 0
     for topic, case_id in topic_case_pairs:
-        case = by_id[case_id]
-        lines = [f"{t.get('speaker','unknown')}: {t.get('text','')}" for t in case.get("transcript", [])]
-        record = {"case_id": case_id, "pretext": topic, "transcript": "\n".join(lines),
-                   "label": 0, "fallback": is_fallback_batch}
+        case = by_id.get(case_id)
+        if case is not None:
+            is_valid, reason = validate_benign_case(case)
+        else:
+            is_valid, reason = False, "case_id absent from model response (batch under-return)"
+
+        if is_valid:
+            lines = [f"{t.get('speaker','unknown')}: {t.get('text','')}" for t in case.get("transcript", [])]
+            record = {"case_id": case_id, "pretext": topic, "transcript": "\n".join(lines),
+                       "label": 0, "accepted": True, "fallback": False}
+            n_accepted += 1
+        else:
+            lines = [
+                f"{t.get('speaker','unknown')}: {t.get('text','')}"
+                for t in (case.get("transcript", []) if isinstance(case, dict) else [])
+            ]
+            record = {"case_id": case_id, "pretext": topic, "transcript": "\n".join(lines),
+                       "label": 0, "accepted": False, "rejection_reason": reason}
+            logger.warning("Benign case %s rejected: %s", case_id, reason)
+            n_rejected += 1
+
         with TRANSCRIPT_PATH.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    logger.info(
+        "Benign batch summary: %d/%d cases accepted, %d rejected.",
+        n_accepted, len(topic_case_pairs), n_rejected,
+    )
 
     time.sleep(0.2)
 
