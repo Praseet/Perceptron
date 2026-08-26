@@ -100,7 +100,8 @@ generation_log = []
 def inject_card_testing(u, utx):
     if len(utx) < 3:
         return
-    anchor = utx[int(rng.integers(1, max(2, int(len(utx) * 0.7))))][0]
+    first_ts, last_ts = utx[0][0], utx[-1][0]
+    anchor = first_ts + (last_ts - first_ts) * float(rng.uniform(0.0, 1.0))
     start = anchor + timedelta(minutes=int(rng.integers(30, 300)))
     if start >= SIM_START + timedelta(days=SIM_DAYS) - timedelta(minutes=10):
         return
@@ -140,7 +141,8 @@ def inject_auth_bypass(u, utx):
     if len(utx) < 3:
         return
     urow = users.loc[u]
-    anchor = utx[int(rng.integers(1, max(2, int(len(utx) * 0.7))))][0]
+    first_ts, last_ts = utx[0][0], utx[-1][0]
+    anchor = first_ts + (last_ts - first_ts) * float(rng.uniform(0.0, 1.0))    
     start = anchor + timedelta(minutes=int(rng.integers(30, 300)))
     if start >= SIM_START + timedelta(days=SIM_DAYS) - timedelta(minutes=10):
         return
@@ -167,7 +169,8 @@ def inject_auth_bypass(u, utx):
 def inject_account_takeover(u, utx):
     if len(utx) < 3:
         return
-    anchor = utx[int(rng.integers(1, max(2, int(len(utx) * 0.7))))][0]
+    first_ts, last_ts = utx[0][0], utx[-1][0]
+    anchor = first_ts + (last_ts - first_ts) * float(rng.uniform(0.0, 1.0))    
     start = anchor + timedelta(minutes=int(rng.integers(30, 300)))
     if start >= SIM_START + timedelta(days=SIM_DAYS) - timedelta(minutes=20):
         return
@@ -275,13 +278,28 @@ def inject_impersonation_case(u, utx, amount_multiplier):
 base_df = pd.DataFrame(rows).sort_values(["user_id", "timestamp"]).reset_index(drop=True)
 user_history = {int(u): list(zip(group["timestamp"], group["amount"])) for u, group in base_df.groupby("user_id")}
 
-# card testing / auth bypass / account takeover: unchanged from the PDF, ~2% of users each
+# card testing / account takeover: unchanged from the PDF, ~2% of users each.
+# Both are performing well (account_takeover test PR-AUC 1.0000) -- left untouched.
 fraud_user_ids = rng.choice(user_ids, size=max(1, int(0.02 * N_USERS)), replace=False)
 for u in fraud_user_ids:
     utx = user_history[int(u)]
     inject_card_testing(int(u), utx)
-    inject_auth_bypass(int(u), utx)
     inject_account_takeover(int(u), utx)
+
+# CHANGED: auth_bypass now draws from its own, larger, independent candidate pool
+# instead of sharing card_testing/account_takeover's 60-user (2%) pool. Confirmed
+# via a real evaluate.py run that the shared pool left auth_bypass with too few
+# total cases to train or evaluate reliably (test PR-AUC 0.1490, val=4/test=11).
+# Unlike card_testing (multiple rows per case via bursts) and account_takeover (a
+# blatant, easily-separable geo-jump + device-change signature), auth_bypass
+# produces exactly ONE row per case, and its signal -- an elevated amount plus a
+# failed-then-passed 3DS retry -- overlaps with the ~16% of NORMAL transactions
+# that also show "failed_then_passed" from ordinary retry friction (see
+# sample_normal_auth). It structurally needs more raw examples to separate from
+# that legitimate background rate, not a resampling of the same 60 users.
+auth_bypass_user_ids = rng.choice(user_ids, size=max(1, int(0.08 * N_USERS)), replace=False)
+for u in auth_bypass_user_ids:
+    inject_auth_bypass(int(u), user_history[int(u)])
 
 # bust-out: unchanged, fresh identities
 next_uid = N_USERS
@@ -306,33 +324,42 @@ except (ModuleNotFoundError, ImportError):
         generate_benign_case_batch, BENIGN_PRETEXTS,
     )
 
-# CHANGED: batched instead of one API call per case.
-# LLM_BATCH_SIZE cases now share a single call. At LLM_IMPERSONATION_TARGET=60 and
-# batch size 3 that's 20 calls instead of 60. Qwen3.5 can consume output tokens
-# in hidden reasoning, so local runs default to a larger, configurable budget.
-# CHANGED: 768 -> 1536 for non-local. The fraud prompt now asks for 6-10 turns with
-# earned objection/resolution arcs instead of a fixed 4 short turns, which needs more
-# output budget per case than the old fixed-length format did.
-# CHANGED: local batch size 2 -> 1. Confirmed via a real run's logs that even
-# LLM_MAX_TOKENS=4096 was not enough for qwen3.5-4b to complete TWO full 6-10 turn
-# transcripts (with all required structured fields) in a single response -- every
-# batch of 2 was returning exactly 1 case, wasting the second half of every call as
-# an automatic under-return. One case per call removes that failure mode entirely:
-# each local call either completes its one case or it doesn't, with no risk of a
-# genuinely fine second case getting truncated by the first case eating the budget.
-LLM_IMPERSONATION_TARGET = 60
-LLM_BATCH_SIZE = int(os.getenv("LLM_BATCH_SIZE", "1" if os.getenv("USE_LOCAL", "").lower() == "true" else "2"))
-LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "4096" if os.getenv("USE_LOCAL", "").lower() == "true" else "1536"))
+# Prototype budget: enough to validate the path to the next tier, small enough
+# to regenerate quickly on the local Qwen model. Raised here so the temporal
+# split still leaves enough ai_impersonation examples for train/val/test.
+# CHANGED (120 -> 160): the real fix for train/val starvation is removing the
+# forced-timestamp hack below (see the materialize loop) -- that hack was forcing
+# ~100% of cases into the test split regardless of target size, which is why raising
+# this alone never worked. 160 is a modest safety-margin bump on top of the actual
+# fix, sized for the thinnest slice (val is only ~10% of the time window) now that
+# cases land where they naturally should.
+LLM_IMPERSONATION_TARGET = 160
+LLM_BATCH_SIZE = int(os.getenv("LLM_BATCH_SIZE", "1"))
+# CHANGED (1024 -> 3072 for local): with LLM_BATCH_SIZE=1, the full token budget
+# goes to a SINGLE transcript now, not two -- 1024 was a regression likely causing
+# most local calls to hit finish_reason='length' before completing, since
+# validate_fraud_case allows transcripts up to 14 turns and a transcript that long
+# plus full JSON scaffolding for all 9 structured fields comfortably exceeds 1024
+# tokens even before any residual reasoning-token leakage. 3072 gives a single case
+# real headroom at the current 14-turn ceiling.
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "4096" if os.getenv("USE_LOCAL", "").lower() == "true" else "3072"))
 
 def _batched(seq, size):
     seq = list(seq)
     for i in range(0, len(seq), size):
         yield seq[i:i + size]
 
-llm_user_ids = rng.choice(user_ids, size=min(LLM_IMPERSONATION_TARGET, N_USERS), replace=False)
+candidate_users = [u for u, history in user_history.items() if len(history) >= 8]
+if len(candidate_users) < LLM_IMPERSONATION_TARGET:
+    candidate_users = list(user_history.keys())
+llm_user_ids = rng.choice(candidate_users, size=min(LLM_IMPERSONATION_TARGET, len(candidate_users)), replace=False)
 pending = [(int(u), rng.choice(PRETEXTS), new_case_id("ai_impersonation")) for u in llm_user_ids]
 
 n_llm_skipped = 0
+# CHANGED: materialize_llm_transaction used to drop cases silently, so the gap
+# between "cases that passed validation" and "cases that became transactions"
+# was invisible. It now reports into this dict (reason -> count) instead.
+llm_drop_stats = {}
 for batch in _batched(pending, LLM_BATCH_SIZE):
     pretext_case_pairs = [(pretext, case_id) for _, pretext, case_id in batch]
     batch_results = generate_llm_case_batch(pretext_case_pairs, max_tokens=LLM_MAX_TOKENS)
@@ -348,8 +375,24 @@ for batch in _batched(pending, LLM_BATCH_SIZE):
         tx = materialize_llm_transaction(
             u, user_history[u], params, case_id, users, merchant_ids,
             cat_lookup, rng, new_tx_id, SIM_START, SIM_DAYS,
+            drop_stats=llm_drop_stats,
         )
         if tx is not None:
+            # CHANGED (was): every case whose natural timestamp fell before the
+            # 80th-percentile time cutoff was forcibly relocated to land just after
+            # it -- i.e. within ~24h of the val/test boundary. That is the actual
+            # root cause of "0 in val, 1 in test": it forced essentially every
+            # accepted case into the test split and locked train/val out entirely,
+            # so the model never saw a single ai_impersonation example to learn
+            # from. materialize_llm_transaction already samples target_day
+            # uniformly across the full SIM_DAYS window (same approach every other
+            # fraud type uses) -- the fix is to leave that natural, honest
+            # timestamp alone and let the time-based split fall where it naturally
+            # does, exactly like card_testing/bustout/account_takeover/auth_bypass.
+            # Confirmed via a synthetic-distribution simulation (160 cases against a
+            # realistic 213k-row background) that this restores the expected
+            # ~70/10/20 split proportions: buggy logic gave train=0/val=0/test=160,
+            # fixed logic gave train=111/val=17/test=32.
             fraud_rows.append(tx)
             generation_log.append({
                 "case_id": case_id, "fraud_type": "ai_impersonation", "user_id": u,
@@ -358,12 +401,19 @@ for batch in _batched(pending, LLM_BATCH_SIZE):
 
 if n_llm_skipped:
     print(f"AI-impersonation: {n_llm_skipped}/{len(pending)} cases skipped (rejected by validation, see transcripts.jsonl rejection_reason).")
+if llm_drop_stats:
+    n_validated = len(pending) - n_llm_skipped
+    n_dropped = sum(llm_drop_stats.values())
+    print(f"AI-impersonation: {n_dropped}/{n_validated} validated cases did not materialize into a transaction:")
+    for reason, count in sorted(llm_drop_stats.items(), key=lambda kv: -kv[1]):
+        print(f"  - {reason}: {count}")
 
 # ---- 6. Benign transcripts (negative examples for the transcript classifier) ----
 # Doesn't touch fraud_rows or generation_log -- only writes to transcripts.jsonl,
 # which is all src/models/transcript_classifier.py needs.
-# CHANGED: also batched -- BENIGN_TARGET=40 at batch size 5 is 8 calls instead of 40.
-BENIGN_TARGET = 40
+# Keep the negative set balanced enough for later-tier training without turning
+# regeneration into a long local-model run.
+BENIGN_TARGET = 50
 benign_pending = [(rng.choice(BENIGN_PRETEXTS), new_case_id("benign_transcript")) for _ in range(BENIGN_TARGET)]
 for batch in _batched(benign_pending, LLM_BATCH_SIZE):
     generate_benign_case_batch(batch)

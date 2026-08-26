@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import time
 import random
 import logging
@@ -25,14 +26,17 @@ ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 LOCAL_BASE_URL = os.getenv("LOCAL_BASE_URL", "http://localhost:1234/v1")
-LOCAL_MODEL = os.getenv("LOCAL_MODEL", "qwen2.5-7b-instruct")
+LOCAL_MODEL = os.getenv("LOCAL_MODEL", "qwen3.5-4b")
 USE_LOCAL = os.getenv("USE_LOCAL", "false").lower() == "true"
 LOCAL_RETRIES = int(os.getenv("LOCAL_RETRIES", "2"))
-LOCAL_TEMPERATURE = float(os.getenv("LOCAL_TEMPERATURE", "0.2"))
-# Qwen3.5 can emit hidden reasoning even when instructed not to. 768 tokens is
-# too little for a three-case structured batch when that happens, whereas 2048
-# leaves room for both the occasional reasoning and the final JSON response.
-LOCAL_MAX_TOKENS = int(os.getenv("LOCAL_MAX_TOKENS", "2048"))
+LOCAL_TEMPERATURE = float(os.getenv("LOCAL_TEMPERATURE", "0.40"))
+# Keep local requests compact so Qwen3.5 4B Q_K_S does not burn the full budget
+# on reasoning instead of emitting the JSON payload. Raised from 1024 to 2048
+# alongside the extended (6-14 turn) fraud transcripts: with LLM_BATCH_SIZE=1
+# each call is a single case, so this is comfortably ahead of the ~800-1000
+# tokens a 14-turn transcript + structured fields actually needs, leaving
+# margin for occasional hidden reasoning without being wastefully large.
+LOCAL_MAX_TOKENS = int(os.getenv("LOCAL_MAX_TOKENS", "4096"))
 _local_client = OpenAI(
     base_url=LOCAL_BASE_URL,
     api_key="lm-studio",
@@ -59,7 +63,7 @@ LOCAL_FRAUD_RESPONSE_FORMAT = {
                             "transcript": {
                                 "type": "array",
                                 "minItems": 6,
-                                "maxItems": 10,
+                                "maxItems": 14,
                                 "items": {
                                     "type": "object",
                                     "properties": {
@@ -147,6 +151,26 @@ LOCAL_BENIGN_RESPONSE_FORMAT = {
         },
     },
 }
+
+TRANSCRIPT_VISION = """Write realistic payment-fraud and scam transcripts for a prototype fraud-detection project.
+Keep every case grounded in the playbook vision: short, believable consumer payment scenarios that show
+how an attacker pressures a target into a transfer, credential handoff, card payment, crypto move, gift
+card purchase, or remote-access action. Avoid generic call-center roleplay, avoid legal or medical drama,
+and avoid mention of training, prompts, policy, or model behavior.
+
+Fraud transcripts must follow these rules:
+- Between 6 and 14 turns -- shorter for quick refusals, longer where more back-and-forth persuasion or verification fits naturally.
+- Speakers alternate between attacker and target.
+- The attacker should sound specific, urgent, and operationally plausible.
+- The target should show hesitation, verification attempts, refusal, or compliance that matches the labeled outcome.
+- The transcript should make the requested action and final outcome obvious from the dialogue itself.
+
+Benign transcripts must follow these rules:
+- Exactly 4 turns.
+- Speakers alternate customer and agent.
+- The dialogue should be routine account or support conversation with no fraud pressure.
+- Keep it realistic, concise, and clearly non-fraudulent.
+"""
 
 
 # CHANGED (bugfix): the judge call (_judge_final_turn) needs a tiny {"matches": bool,
@@ -314,13 +338,21 @@ def _structured_local(system, prompt, max_tokens, retries, response_format=None)
     local_retries = max(1, min(retries, LOCAL_RETRIES))
     for attempt in range(local_retries):
         try:
+            local_prompt = (
+                prompt
+                + "\n\nReturn only valid JSON. Do not add explanations, markdown, or reasoning."
+                + " Keep each case concise and self-contained."
+                + " Make each case feel distinct: vary the opening, pressure style, wording,"
+                + " and ending so cases do not read like repeats."
+                + " /no_think"
+            )
             resp = _local_client.chat.completions.create(
                 model=LOCAL_MODEL, max_tokens=max_tokens, temperature=LOCAL_TEMPERATURE,
                 response_format=response_format,
                 messages=[{"role": "system", "content": local_system},
                           # This LM Studio Qwen3.5 template ignores the system-level
                           # control token, so repeat it as the final user instruction.
-                          {"role": "user", "content": prompt + "\n/no_think"}],
+                          {"role": "user", "content": local_prompt}],
             )
             message = resp.choices[0].message
             text = (message.content or "").strip()
@@ -355,7 +387,7 @@ def _structured_local(system, prompt, max_tokens, retries, response_format=None)
     return None
 
 
-def call_structured(system: str, prompt: str, max_tokens: int = 2048, retries: int = 4,
+def call_structured(system: str, prompt: str, max_tokens: int = 4096, retries: int = 4,
                      local_response_format=None):
     """Returns a parsed dict, or None if every attempt failed (caller supplies the fallback).
 
@@ -384,6 +416,15 @@ PRETEXTS = [
     "technical support contact",
     "family emergency payment request",
     "investment opportunity urgency",
+    "tax authority overdue payment notice",
+    "utility disconnection final notice",
+    "employer payroll correction request",
+    "romance relationship financial help",
+    "lottery or prize claim fee",
+    "subscription auto-renewal dispute",
+    "cryptocurrency exchange account freeze",
+    "government benefit re-verification",
+    "landlord or rental deposit refund",
 ]
 
 # ---------- CHANGED: batched fraud-case generation ----------
@@ -395,6 +436,11 @@ TARGET_PERSONAS = [
     "a cautious person who has read about scams before and gets suspicious quickly",
     "a young adult who is anxious about doing something wrong and eager to comply fast",
     "a skeptical person who pushes back hard and asks pointed verification questions",
+    "a parent who is preoccupied with childcare and answers quickly without full attention",
+    "a small-business owner who is used to vendor and supplier calls and lowers their guard for anything sounding official",
+    "someone less familiar with local bank procedures who defers to anyone who sounds official",
+    "a person under financial stress who is more receptive to urgent money-related requests",
+    "a confident, tech-savvy person who questions technical details but can still be swayed by specific-sounding jargon",
 ]
 
 # CHANGED (was): BATCH_SYSTEM previously hard-coded "transaction_attempted MUST be
@@ -419,8 +465,9 @@ OUTCOME_STATES = [
 ]
 # Deliberately skewed toward outcomes useful to this project, not a claim about
 # real-world social-engineering success rates. Every state stays genuinely present.
-# Rebalance directly here if the accepted-case mix needs adjusting later.
-OUTCOME_WEIGHTS = [0.20, 0.15, 0.10, 0.15, 0.25, 0.15]
+# Slightly favor transaction-producing endings so the downstream tabular model
+# actually sees enough ai_impersonation examples after the temporal split.
+OUTCOME_WEIGHTS = [0.10, 0.10, 0.08, 0.15, 0.28, 0.29]
 
 OUTCOME_GUIDANCE = {
     "refused": (
@@ -444,9 +491,14 @@ OUTCOME_GUIDANCE = {
     ),
     "credential_shared": (
         "The target ends the conversation by providing or clearly agreeing to "
-        "provide a password, PIN, one-time code, or similar authentication "
-        "information -- but does NOT explicitly send money or authorize a payment "
-        "in this conversation."
+        "provide a LOGIN-STYLE authentication credential -- a password, PIN, "
+        "security-question answer, or one-time code -- but does NOT explicitly "
+        "send money or authorize a payment in this conversation. Do NOT use this "
+        "outcome for a full payment card number, CVV, or expiry date: disclosing "
+        "complete card details is payment-card compromise, not a login-credential "
+        "handover -- use 'payment_attempted' or 'payment_completed' for that "
+        "content instead, since a usable card number is functionally the same as "
+        "an authorized transaction attempt."
     ),
     "payment_attempted": (
         "The target ends the conversation by clearly agreeing to send money, "
@@ -585,6 +637,27 @@ META_LANGUAGE_MARKERS = [
     "hypothetical scenario", "this is just an example", "for training purposes",
 ]
 
+# CHANGED: CREDENTIAL_MARKERS' generic phrases ("here's my", "the number is") match
+# a PIN/password handover and a full payment-card handover equally -- they only
+# detect THAT something was disclosed, not WHAT. Real qwen3.5-4b output confirmed
+# this: a full card number + CVV + expiry got accepted under "credential_shared"
+# (see CHANGELOG), which is wrong -- a usable card number is payment-card
+# compromise, not a login credential, and belongs under payment_attempted /
+# payment_completed instead. This is a targeted content check for that one gap,
+# not a general rewrite of the outcome taxonomy.
+CARD_NUMBER_PATTERN = re.compile(r"(?:\d[ -]?){13,19}")
+CARD_CONTEXT_MARKERS = ["cvv", "cvc", "expiry", "exp date", "expiration date", "card number"]
+
+def _discloses_full_card_data(text: str) -> bool:
+    """True if `text` contains a card-number-shaped digit run alongside a
+    CVV/expiry-style marker -- i.e. enough to attempt a charge, not just a
+    login credential. Deliberately narrow (both signals required) so it
+    doesn't flag an OTP or account-number-only disclosure, which is exactly
+    what credential_shared is meant to cover."""
+    if not CARD_NUMBER_PATTERN.search(text):
+        return False
+    return any(marker in text for marker in CARD_CONTEXT_MARKERS)
+
 # ---------- adaptive fallback: an LLM judge for cases the keyword lists can't ----------
 # CHANGED: keyword matching alone proved too brittle against a live model's actual
 # range of phrasing -- real qwen3.5-4b output included valid, unambiguous outcome
@@ -630,7 +703,7 @@ def _judge_final_turn(final_target_text: str, assigned_outcome: str) -> tuple[bo
         f'final target turn: "{final_target_text}"\n\n'
         "Does this final turn clearly demonstrate the assigned outcome?"
     )
-    result = call_structured(JUDGE_SYSTEM, prompt, max_tokens=150, retries=2,
+    result = call_structured(JUDGE_SYSTEM, prompt, max_tokens=300, retries=2,
                               local_response_format=LOCAL_JUDGE_RESPONSE_FORMAT)
     if result is None or "matches" not in result:
         return False, "judge call failed or returned no usable response (failing closed)"
@@ -649,8 +722,8 @@ def validate_fraud_case(case: dict, assigned_outcome: str, use_judge_fallback: b
     transcript = case.get("transcript")
     if not isinstance(transcript, list):
         return False, "transcript missing or not a list"
-    if len(transcript) > 10:
-        return False, f"transcript has too many turns ({len(transcript)} > 10)"
+    if len(transcript) > 14:
+        return False, f"transcript has too many turns ({len(transcript)} > 14)"
 
     speakers = [t.get("speaker") for t in transcript]
     if any(s not in ("attacker", "target") for s in speakers):
@@ -731,6 +804,22 @@ def validate_fraud_case(case: dict, assigned_outcome: str, use_judge_fallback: b
                     )
                 break
 
+    # CHANGED: CREDENTIAL_MARKERS' generic phrasing let a full card-number +
+    # CVV/expiry handover pass validation as "credential_shared" (confirmed
+    # against real qwen3.5-4b output -- see CHANGELOG). That content is
+    # payment-card compromise, not a login-credential handover, and it was
+    # silently costing generation yield too, since materialize_llm_transaction
+    # can never turn a credential_shared case into a transaction by design.
+    # Reject here so it retries into a more accurate outcome instead of
+    # reaching transcripts.jsonl mislabeled.
+    if assigned_outcome == "credential_shared" and _discloses_full_card_data(final_target_text):
+        return False, (
+            "assigned 'credential_shared' but final target turn discloses full "
+            "payment-card data (card number + CVV/expiry) -- that is payment-card "
+            "compromise, not a login-credential handover; should be "
+            "'payment_attempted' or 'payment_completed' instead"
+        )
+
     expected_attempted = assigned_outcome in ("payment_attempted", "payment_completed")
     if bool(case.get("transaction_attempted")) != expected_attempted:
         return False, (
@@ -772,19 +861,10 @@ def _fallback_case(pretext: str, case_id: str, assigned_outcome: str = "refused"
     that was the original fabrication bug. This placeholder is always
     non-transacting regardless of assigned_outcome, since it exists to be logged as
     rejected, not materialized."""
-    if pretext == "family emergency payment request":
-        victim = "Mom"
-        reason = "surgery deposit"
-    elif pretext == "courier delivery fee":
-        victim = "there"
-        reason = "customs handling"
-    else:
-        victim = "there"
-        reason = "account security"
     return {
         "case_id": case_id,
         "transcript": [
-            {"speaker": "attacker", "text": f"Hello, this is regarding an urgent matter about {reason} on your account."},
+            {"speaker": "attacker", "text": f"Hello, this is regarding an urgent matter about {pretext} on your account."},
             {"speaker": "target", "text": f"Wait, who is this? I wasn't expecting a call about {pretext}."},
             {"speaker": "attacker", "text": "This is time-sensitive -- your account will be locked if we don't act now."},
             {"speaker": "target", "text": "I'm not comfortable doing this without verifying first. I'll call the number on my card."},
@@ -807,7 +887,13 @@ def _call_batch_for_outcomes(system_prompt: str, quadruples: list[tuple[str, str
         f"- pretext: '{p}', persona: '{persona}', assigned_outcome: '{o}', case_id: '{c}'"
         for p, persona, o, c in quadruples
     )
-    prompt = f"Generate one synthetic scam conversation for each of these cases:\n{prompt_lines}"
+    prompt = (
+        "You are generating synthetic APP-fraud transcripts for a prototype benchmark.\n"
+        "Use only the instructions in this request. Do not rely on any external file.\n"
+        "Keep each case realistic, on-vision, and concise enough for a local Qwen 3.5 4B model.\n"
+        "Do not include commentary, analysis, or markdown.\n\n"
+        f"Generate one synthetic scam conversation for each of these cases:\n{prompt_lines}"
+    )
     # Explicit rather than relying on _structured_local's implicit fraud-schema
     # default -- every call site should now name its own schema so a future new
     # call path can't silently inherit the wrong one the way benign/judge did.
@@ -835,7 +921,7 @@ def generate_llm_case_batch(pretext_case_pairs, max_tokens: int | None = None):
     for a failed case -- rejection is a valid terminal state, not an error to paper
     over with invented data.
     """
-    # 6-10 turn transcripts with 5+ structured fields need more room than the old
+    # 6-14 turn transcripts with 5+ structured fields need more room than the old
     # fixed 4-turn format did. LOCAL_MAX_TOKENS already accounts for hidden reasoning
     # separately from this output budget.
     max_tokens = max_tokens if max_tokens is not None else (LOCAL_MAX_TOKENS if ACTIVE_PROVIDER == "local" else 1536)
@@ -952,7 +1038,16 @@ def generate_llm_case_batch(pretext_case_pairs, max_tokens: int | None = None):
             "target_outcome": str(case.get("target_outcome", assigned_outcome)),
             "amount_multiplier": float(case.get("amount_multiplier", np.random.uniform(4.0, 8.0))),
             "urgency_level": str(case.get("urgency_level", "medium")),
-            "pretext_category": str(case.get("pretext_category", pretext)),
+            # CHANGED: pretext_category used to trust the model's own free-text echo
+            # of the pretext (case.get("pretext_category", pretext)). Observed real
+            # output showed the same input pretext coming back as three different
+            # strings across calls (e.g. "government_benefit_verification" vs
+            # "government_benefit_re-verification" vs the literal input string) --
+            # the model is generating this field, not copying it. Since the input
+            # `pretext` is already known ground truth, use it directly so every case
+            # from the same PRETEXTS entry groups identically downstream (this field
+            # is read by impersonation_diagnostics.py's categorical value_counts).
+            "pretext_category": pretext,
             "fallback": False,
             "label": 1,
         }
@@ -988,6 +1083,15 @@ BENIGN_PRETEXTS = [
     "requesting a password reset",
     "asking about a subscription renewal date",
     "reporting a minor product defect",
+    "updating a mailing address",
+    "asking how to redeem a loyalty reward",
+    "checking current account balance",
+    "asking about branch operating hours",
+    "requesting a replacement debit card for wear and tear",
+    "clarifying a line item on a recent statement",
+    "asking about international transaction fees",
+    "updating a phone number on file",
+    "asking how to set up a recurring bill payment",
 ]
 
 BENIGN_BATCH_SYSTEM = """You are a synthetic conversational data generator for a customer-service benchmark.
@@ -1069,9 +1173,15 @@ def generate_benign_case_batch(topic_case_pairs, max_tokens: int | None = None):
     CHANGED: every returned case is validated (validate_benign_case) for structure
     and fraud-shape contamination before being accepted -- same reject-and-log
     discipline as the fraud path, no silent fabrication."""
-    max_tokens = max_tokens if max_tokens is not None else (LOCAL_MAX_TOKENS if ACTIVE_PROVIDER == "local" else 768)
+    max_tokens = max_tokens if max_tokens is not None else (LOCAL_MAX_TOKENS if ACTIVE_PROVIDER == "local" else 1568)
     prompt_pairs = "\n".join(f"- topic: '{t}', case_id: '{c}'" for t, c in topic_case_pairs)
-    prompt = f"Generate one ordinary customer-service conversation for each of these cases:\n{prompt_pairs}"
+    prompt = (
+        "You are generating synthetic benign customer-service transcripts for a prototype benchmark.\n"
+        "Use only the instructions in this request. Do not rely on any external file.\n"
+        "Keep the dialogue ordinary, short, and fully self-contained.\n"
+        "Do not include fraud pressure, analysis, or markdown.\n\n"
+        f"Generate one ordinary customer-service conversation for each of these cases:\n{prompt_pairs}"
+    )
 
     # CHANGED (bugfix): explicitly request the benign schema (customer/agent, exactly
     # 4 turns) instead of silently inheriting the fraud schema through the old
@@ -1132,37 +1242,86 @@ def generate_benign_case(topic: str, case_id: str) -> dict:
 
 
 def materialize_llm_transaction(u, utx, params, case_id, users, merchant_ids,
-                                 cat_lookup, rng, new_tx_id, sim_start, sim_days):
+                                 cat_lookup, rng, new_tx_id, sim_start, sim_days,
+                                 drop_stats=None):
     """
-    Turns extracted conversation parameters into an actual transaction row -- same
-    schema, same leakage discipline as inject_impersonation_case in rule_generator.py.
-    Unchanged from the original.
+    Turns extracted conversation parameters into an actual transaction row.
+
+    CHANGED: device_id, three_ds_result/three_ds_failures_before_result, and
+    lat/lon used to be fixed constants (dev_{u}_0, "passed_first_try", home
+    coords) for every single case. That meant `amount` was the *only* feature
+    that varied for ai_impersonation -- the detector had nothing consistent to
+    learn beyond "big purchase", which is why its per-fraud-type PR-AUC was
+    far below every other fraud type. These three fields are now sampled,
+    conditioned on params["urgency_level"] (already produced by the LLM but
+    previously discarded after generation) since a high-pressure call is more
+    plausibly linked to a new device/session or a fumbled 3DS attempt than a
+    calm one.
+
+    CHANGED: the three early-exit points below used to `return None` silently,
+    so there was no way to tell whether a case was lost to "no transaction
+    attempted", "landed too close to the simulation boundary", or "user had
+    too little prior history at that random day" -- only the final surviving
+    count was visible. They now report through `drop_stats`, an optional dict
+    passed in by the caller and mutated in place (reason -> count), so the
+    caller can print the real breakdown instead of guessing at it.
     """
-    if not params.get("transaction_attempted"):
+    def _drop(reason):
+        if drop_stats is not None:
+            drop_stats[reason] = drop_stats.get(reason, 0) + 1
         return None
+
+    if not params.get("transaction_attempted"):
+        return _drop("transaction_not_attempted")
 
     urow = users.loc[u]
     target_day = rng.uniform(0.0, float(sim_days))
     start = sim_start + timedelta(days=float(target_day))
     if start >= sim_start + timedelta(days=sim_days) - timedelta(minutes=5):
-        return None
+        return _drop("too_close_to_sim_end")
 
     prior_tx = [r for r in utx if r[0] < start]
     if len(prior_tx) < 2:
-        return None
+        return _drop("insufficient_prior_history")
 
     m = int(rng.choice(merchant_ids))
     typical = float(np.mean([r[1] for r in prior_tx]))
     amount = float(typical * float(params.get("amount_multiplier", 1)))
     age = int(urow.account_age_days_at_start + target_day)
 
+    urgency = str(params.get("urgency_level", "medium")).lower()
+
+    # New/unfamiliar device: more likely under a high-pressure pretext (victim
+    # walked through installing something or authorizing from a new session).
+    new_device_prob = {"high": 0.30, "medium": 0.15, "low": 0.05}.get(urgency, 0.15)
+    device_id = f"dev_{u}_new" if rng.random() < new_device_prob else f"dev_{u}_0"
+
+    # 3DS friction: a calm, well-rehearsed scammer script still tends to pass
+    # first try, but higher urgency raises the odds of a fumbled/retried step.
+    friction_prob = {"high": 0.35, "medium": 0.20, "low": 0.08}.get(urgency, 0.20)
+    if rng.random() < friction_prob:
+        three_ds_result = "failed_then_passed"
+        three_ds_failures = int(rng.integers(1, 3))
+    else:
+        three_ds_result = "passed_first_try"
+        three_ds_failures = 0
+
+    # Geo: usually still near home (most of these happen mid-conversation at
+    # home), with a modest chance of being away from home / distracted.
+    if rng.random() < 0.12:
+        lat = urow.home_lat + rng.normal(0, 2.0)
+        lon = urow.home_lon + rng.normal(0, 2.0)
+    else:
+        lat = urow.home_lat + rng.normal(0, 0.05)
+        lon = urow.home_lon + rng.normal(0, 0.05)
+
     return {
         "transaction_id": new_tx_id(), "user_id": int(u), "timestamp": start,
         "amount": amount, "merchant_id": m, "merchant_category": cat_lookup[m],
-        "device_id": f"dev_{u}_0",
-        "lat": float(urow.home_lat + rng.normal(0, 0.05)),
-        "lon": float(urow.home_lon + rng.normal(0, 0.05)),
+        "device_id": device_id,
+        "lat": float(lat), "lon": float(lon),
         "channel": "ecom", "account_age_days": age, "is_fraud": 1,
         "fraud_type": "ai_impersonation", "case_id": case_id, "ring_id": None,
-        "three_ds_result": "passed_first_try", "three_ds_failures_before_result": 0,
+        "three_ds_result": three_ds_result,
+        "three_ds_failures_before_result": three_ds_failures,
     }

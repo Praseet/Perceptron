@@ -126,3 +126,5 @@ if len(missed) > 0:
 print("\n" + "=" * 80)
 print("EVALUATION COMPLETE — All metrics logged to CHANGELOG.md")
 print("=" * 80)
+print(val_df["fraud_type"].value_counts())
+print(test_df["fraud_type"].value_counts())
