@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
@@ -29,6 +28,26 @@ def run_shap_analysis():
     print("Computing TreeSHAP values across test dataset...")
     explainer = shap.TreeExplainer(model)
     shap_values = explainer(X_test)
+
+    # 2b. Correctness self-check: SHAP is only trustworthy as an explanation
+    # if it actually decomposes the model's output. For tree_path_dependent
+    # XGBoost explainers, base + sum(SHAP) must equal the raw margin
+    # (log-odds). A mismatch here means explainer/model drifted apart and
+    # every plot below would be explaining the wrong function.
+    pos = np.clip(model.predict_proba(X_test)[:, 1], 1e-15, 1 - 1e-15)
+    margins = np.log(pos / (1 - pos))  # exact inverse of the sigmoid link
+    reconstructed = explainer.expected_value + shap_values.values.sum(axis=1)
+    if len(np.atleast_1d(explainer.expected_value)) == 1:
+        max_dev = float(np.max(np.abs(margins - reconstructed)))
+        print(f"Additivity check: max |margin - (base + sum(SHAP))| = {max_dev:.2e}")
+        # Tolerance note: XGBoost trees are float32, so summing 300 trees'
+        # contributions leaves ~1e-3 log-odds residue even for an EXACT
+        # explanation. A wrong/unrelated artifact would miss by orders of
+        # magnitude, hence the generous 0.05 gate -- this guards against
+        # "explaining the wrong model", not float rounding.
+        if max_dev > 5e-2:
+            print("  WARNING: SHAP decomposition does not match the model margin "
+                  "-- explanations may be unreliable for this artifact.")
 
     Path("models_artifacts").mkdir(parents=True, exist_ok=True)
 
@@ -70,9 +89,12 @@ def run_shap_analysis():
         print(f"Detected transaction waterfall saved to: {waterfall_path}")
 
     # 6. Local Explanation: Borderline / Edge-Case Transaction (e.g. AI Impersonation)
+    # Pick the HIGHEST-RISK impersonation case, not an arbitrary first row --
+    # the borderline case the model nearly missed is the interesting story for
+    # a compliance reviewer.
     impersonation_indices = np.where(test_df["fraud_type"] == "ai_impersonation")[0]
     if len(impersonation_indices) > 0:
-        imp_idx = int(impersonation_indices[0])
+        imp_idx = int(impersonation_indices[np.argmax(test_proba[impersonation_indices])])
         tx_imp = test_df.iloc[imp_idx]
         print(f"\nExplaining AI-Impersonation Case: ID={tx_imp.get('transaction_id', 'N/A')} (Prob: {test_proba[imp_idx]:.4f})")
         
@@ -95,7 +117,6 @@ def run_shap_analysis():
     print("\n--- Top 10 Most Impactful Features (SHAP Global Ranking) ---")
     print(top_feature_ranking.head(10).to_string(index=False))
 
-    return explainer
 
 if __name__ == "__main__":
     run_shap_analysis()

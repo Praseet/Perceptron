@@ -1,0 +1,15 @@
+{
+  "best_structural_params": {
+    "n_estimators": 150,
+    "max_samples": 0.8,
+    "max_features": 1.0
+  },
+  "final_contamination": 0.007021157086687886,
+  "frozen_threshold": 0.9,
+  "val_pr_auc": 0.1009269273260514,
+  "test_pr_auc": 0.06540202992328757,
+  "normalization_percentiles": [
+    1.0,
+    99.0
+  ]
+}

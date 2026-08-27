@@ -220,7 +220,7 @@ def list_gemini_models():
     req = urllib.request.Request(url)
     with urllib.request.urlopen(req, timeout=30) as resp:
         data = json.loads(resp.read().decode("utf-8"))
-    print(f"Models available to this key (only ones supporting generateContent):")
+    print("Models available to this key (only ones supporting generateContent):")
     for m in data.get("models", []):
         if "generateContent" in m.get("supportedGenerationMethods", []):
             print(f"  {m['name']}")

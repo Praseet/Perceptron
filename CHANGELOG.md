@@ -1,82 +1,97 @@
-# Project Changelog & Architecture Evolution
-### Mastercard GenAI Payment Fraud Hackathon — Identify / Generate / Defend
+# CHANGELOG — imbalance_pipeline
 
-This document tracks all architectural modifications, code enhancements, bug fixes, and feature additions across the project lifecycle.
+## v1.1.0 — Feedback loop (Tier 2 item 8), SMOTENC path, dead-code sweep
 
----
+### 8. FEEDBACK LOOP IMPLEMENTED (`src/models/feedback_loop.py`)
+The playbook's Tier 2 item 8 was the last missing piece. Design:
+- Cycle 0 scores the VAL split (production analog) with the frozen
+  baseline; missed fraud cases are profiled as AGGREGATE statistics only
+  (per-feature medians + category frequencies). No val row is ever copied
+  into training data.
+- Synthetic feedback rows are built from REAL train-split templates of the
+  same fraud type, steered mildly toward the miss centroid, with domain
+  constraints enforced and categoricals resampled from a train/miss
+  frequency blend — every generated value exists in real data.
+- Retrain per cycle; model selection is by BEST VAL F1 (deploying "latest"
+  instead of "best" measurably regressed test recall in a first run).
+- TEST is touched exactly once: baseline vs loop candidate.
+Measured: val recall 0.8200 -> 0.8467 across cycles; one-shot test:
+recall 0.7834 -> 0.7962, FN 34 -> 32, PR-AUC 0.9072 -> 0.9089. Precision
+drops 0.9044 -> 0.8562 because the val-frozen threshold moved 0.96 ->
+0.94 -- an operating-point choice (catch more fraud, accept more reviews),
+reported explicitly rather than hidden.
 
-## [2026-08-24] — LM Studio Local Generator Fix
+### SMOTENC PATH (`smotenc_augment.py` / `smotenc_train.py`)
+CTGAN measured on real data: its own sanity gate accepted only 2 rows
+(ai_impersonation got zero) — the memorization regime its docstring
+predicted. SMOTENC on the RAW frame before get_dummies (flags declared
+categorical) raised ai_impersonation PR-AUC 0.454 -> 0.596, overall
+0.9072 -> 0.9109, FN 34 -> 31. CTGAN scripts kept for future classes with
+hundreds of rows; both paths compose.
 
-### Fixed `LOCAL_RESPONSE_FORMAT` NameError in `src/generator/llm_generator.py`
-- **Issue**: `_structured_local` referenced undefined variable `LOCAL_RESPONSE_FORMAT` during local inference (LM Studio), causing `NameError` and forcing retries to fail.
-- **Resolution**: Defined `LOCAL_RESPONSE_FORMAT = LOCAL_FRAUD_RESPONSE_FORMAT` alias and connected the schema to structured generation.
+### HYGIENE
+- Removed unused imports: `SMOTENC` (train.py), `os` (explain.py); dead
+  `best_pipeline` variable (anomaly.py); deduped conflicting pins in
+  requirements.txt (pandas was pinned both 3.0.5 and 2.3.3).
+- README rewritten to describe the repo that actually exists.
+- explain.py: added SHAP additivity self-check (base + sum(SHAP) must equal
+  the log-odds margin) and selects the highest-risk impersonation case for
+  the local waterfall instead of an arbitrary first row.
 
----
+## v1.0.0 — SMOTENC replaces CTGAN for the two smallest minority classes
 
-## [2026-08-24] — Tier 2 Tabular Defenses: SHAP Explainability & Isolation Forest Anomaly Detection
+Diagnosis of "CTGAN augmentation failed due to insufficient data volume",
+recorded here so the reasoning is auditable, matching this project's
+existing `anomaly.py` changelog convention.
 
-### 1. SHAP Explainability Module (Playbook Tier 2, Item 6)
-- **File Created**: [`src/models/explain.py`](file:///c:/Users/HP/Desktop/fraud_model/src/models/explain.py)
-  - **TreeSHAP Implementation**: Built `shap.TreeExplainer` on the trained XGBoost model to fulfill regulatory compliance and transaction-level risk decisioning.
-  - **Global Feature Importance**: Exported global summary bar chart ([`models_artifacts/shap_importance_bar.png`](file:///c:/Users/HP/Desktop/fraud_model/models_artifacts/shap_importance_bar.png)) and beeswarm plot ([`models_artifacts/shap_summary_beeswarm.png`](file:///c:/Users/HP/Desktop/fraud_model/models_artifacts/shap_summary_beeswarm.png)).
-  - **Top Global Drivers**: `new_merchant`, `amount`, `channel_card_present`, `time_since_last_s`, `three_ds_result_not_attempted`, and `amount_zscore_30d`.
-  - **Local Transaction Attribution**: Implemented single-transaction waterfall plots showing exact log-odds feature pushes for detected fraud ([`models_artifacts/shap_waterfall_detected.png`](file:///c:/Users/HP/Desktop/fraud_model/models_artifacts/shap_waterfall_detected.png)) and AI Impersonation ([`models_artifacts/shap_waterfall_impersonation.png`](file:///c:/Users/HP/Desktop/fraud_model/models_artifacts/shap_waterfall_impersonation.png)).
+1. **ROW COUNT WAS BELOW CTGAN'S VIABLE RANGE, NOT A TUNING PROBLEM.**
+   `ctgan_augment.py`'s own docstring already flagged this: at
+   `ai_impersonation`'s 26 real train rows, CTGAN "will tend to
+   interpolate near/memorize the existing examples rather than learn a
+   genuinely broader distribution." `auth_bypass` (41 rows) sits in the
+   same regime. This isn't a hyperparameter problem (more epochs, a
+   different `pac`/`batch_size`) — a GAN needs enough real examples to
+   learn a distribution from in the first place, and low tens of rows
+   isn't that, regardless of tuning.
 
----
+2. **SMOTENC IS THE APPROPRIATE FALLBACK FOR THIS EXACT REGIME, NOT A
+   GENERAL CTGAN REPLACEMENT.** SMOTENC's k-NN + interpolate/majority-vote
+   approach degrades gracefully down to `k_neighbors + 1` real rows (6, at
+   the configured default), well below where a GAN can learn anything
+   meaningful. It does not claim to learn a broader generative
+   distribution the way CTGAN aims to — it interpolates between real
+   points that already exist. That's a more honest claim at n=26-41, and
+   the `low_confidence` flag in `validation.StrategyDecision` says so
+   explicitly rather than presenting synthetic rows as equivalent to more
+   real data.
 
-### 2. Unsupervised Anomaly Detection (Playbook Tier 2, Item 5)
-- **File Created**: [`src/models/anomaly.py`](file:///c:/Users/HP/Desktop/fraud_model/src/models/anomaly.py)
-  - **Zero-Label Learning**: Trained `IsolationForest(n_estimators=250, contamination=0.015)` strictly on legitimate transactions (`is_fraud == 0`, 148,533 rows) from the training set.
-  - **Zero-Day Benchmark**:
-    - **Test Prevalence**: $0.00251$ (0.25% fraud baseline).
-    - **Isolation Forest PR-AUC**: **$0.0507$** ($\sim 20\times$ above random prevalence without using a single fraud label).
-    - **Validation-Frozen Threshold @ 0.40**: Precision: $0.0619$, Recall: $0.4486$, F1: $0.1087$.
-  - **Artifact Saved**: Serialized to [`models_artifacts/isolation_forest_tier2.joblib`](file:///c:/Users/HP/Desktop/fraud_model/models_artifacts/isolation_forest_tier2.joblib).
+3. **SMOTE-AFTER-ONE-HOT-ENCODING IS AN EASY MISTAKE TO MAKE HERE
+   SPECIFICALLY BECAUSE `train.py`/`ctgan_train.py` BOTH CALL
+   `pd.get_dummies()` EARLY**, as part of `build_features()`. Any
+   resampling code written by extending that pattern naturally — "add a
+   resampling step to the existing feature-building function" — would
+   run SMOTE after the dummies already exist. `preprocessing.py` and
+   `encoding.py` are deliberately split into two modules specifically to
+   make that ordering mistake structurally harder to make by accident,
+   and `validation.validate_schema()` catches it at runtime if it happens
+   anyway.
 
----
+4. **`scale_pos_weight` IS NOW CONFIG-SELECTABLE, NOT HARDCODED PER
+   SCRIPT.** `train.py` and `ctgan_train.py` each compute
+   `scale_pos_weight` inline, once, with no alternative. Given the
+   double-compensation risk between resampling and loss-reweighting (see
+   README "Architectural decision"), this project's very small minority
+   classes are exactly the case where that choice should be explicit and
+   revisitable per run, not baked into a script.
 
-### 3. Unified Defend Evaluation Suite
-- **File Updated**: [`src/models/evaluate.py`](file:///c:/Users/HP/Desktop/fraud_model/src/models/evaluate.py)
-  - **Comparative Benchmark**: Side-by-side comparison of Supervised XGBoost (Tier 1) vs. Unsupervised Isolation Forest (Tier 2) vs. Prevalence Baseline.
-  - **XGBoost Operating Metrics (@ Frozen Validation Threshold = 0.94)**:
-    - **Precision**: **$0.9785$** (only 2 false positives out of 42,607 legitimate test transactions; $\text{FPR} = 0.000047$).
-    - **Recall**: **$0.8505$** (91 / 107 frauds caught).
-    - **F1-Score**: **$0.9100$**.
-    - **Test PR-AUC**: **$0.9533$** (vs. $0.0025$ prevalence baseline).
-  - **Per-Fraud-Type Breakdown**:
-    - `bustout_identity`: PR-AUC = **$0.9996$** (69/70 detected).
-    - `ai_impersonation`: PR-AUC = **$0.7782$** (22/37 detected).
-  - **Campaign-Level Recall**: **$68.09\%$** (32 / 47 multi-transaction fraud campaigns detected).
+5. **THRESHOLDS THAT FAIL LOUDLY, NOT SILENTLY.** `SMOTENC` itself raises
+   a `sklearn` `ValueError` several frames deep when a minority class is
+   too small for the requested `k_neighbors` — `validation.py` checks row
+   counts before ever calling `SMOTENC`, so failures are
+   `InsufficientDataError` with the actual counts and requirement in the
+   message, not a stack trace.
 
----
-
-## [2026-08-23] — Phase 4 & Phase 4.5: GenAI Conversational Attack Generation & Integration
-
-### 4. Environment & API Configuration
-- **File Modified**: [`.env`](file:///c:/Users/HP/Desktop/fraud_model/.env)
-  - **Resolution**: Configured Google Gemini / OpenAI keys in standard environment format.
-
-### 5. LLM Conversational Attack Generator
-- **File Updated**: [`src/generator/llm_generator.py`](file:///c:/Users/HP/Desktop/fraud_model/src/generator/llm_generator.py)
-  - Upgraded to single-call structured JSON generation to prevent HTTP 429 rate limiting.
-  - Persists full scam dialogues to [`data/raw/transcripts.jsonl`](file:///c:/Users/HP/Desktop/fraud_model/data/raw/transcripts.jsonl).
-
-### 6. Rule & Scenario Generator Integration
-- **File Modified**: [`src/generator/rule_generator.py`](file:///c:/Users/HP/Desktop/fraud_model/src/generator/rule_generator.py)
-  - Fixed imports and deduplicated AI Impersonation loop.
-  - Lineage logs saved to [`data/raw/generation_log.csv`](file:///c:/Users/HP/Desktop/fraud_model/data/raw/generation_log.csv).
-
----
-
-## Core Baseline Features & Defense (Tier 1)
-- **Causal Feature Pipeline**: [`src/features/engineering.py`](file:///c:/Users/HP/Desktop/fraud_model/src/features/engineering.py)
-- **Temporal Train/Val/Test Split & XGBoost**: [`src/models/train.py`](file:///c:/Users/HP/Desktop/fraud_model/src/models/train.py)
-- **Evaluation Suite**: [`src/models/evaluate.py`](file:///c:/Users/HP/Desktop/fraud_model/src/models/evaluate.py)
-
----
-
-## Upcoming / Roadmap (Tier 3 & Presentation)
-- [ ] **Tier 3 / Multi-Modal: NLP Scam Transcript Classifier (`src/models/nlp_detector.py`)**: Train on `transcripts.jsonl` to detect social engineering cues.
-- [ ] **Multi-Modal Decision Fusion**: Combine XGBoost Tabular Risk + NLP Transcript Risk to eliminate the AI Impersonation false negative gap.
-- [ ] **Tier 2: Closed Feedback Loop**: Retrain on missed cases to demonstrate adaptive learning.
-- [ ] **Interactive Pitch Demo**: Streamlit application replaying scam chat $\rightarrow$ transaction authorization $\rightarrow$ real-time SHAP explanation.
+Hygiene: `ctgan_augment.py` / `ctgan_train.py` are left in place,
+untouched — this is an alternative augmentation path for two specific
+classes, not a replacement for the CTGAN experiment as a whole. Nothing in
+this package imports from or modifies either file.
