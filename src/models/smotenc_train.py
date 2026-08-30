@@ -15,19 +15,28 @@ strength double-compensates. Letting the weight fall as synthetic rows are
 added keeps the total correction bounded.
 """
 from pathlib import Path
+import sys
 
 import numpy as np
 import pandas as pd
 import xgboost as xgb
 from sklearn.metrics import average_precision_score, confusion_matrix, f1_score
 
-SEED = 42
-FEATURE_COLS = ["amount", "account_age_days", "tx_last_1min", "tx_last_1hr", "tx_last_24hr",
-                "count_30d", "amount_zscore_30d", "new_device", "new_merchant",
-                "merchant_cat_freq_user", "time_since_last_s", "dist_from_prev_km",
-                "geo_velocity_kmh", "hour_of_day", "three_ds_failures_before_result"]
-CAT_COLS = ["merchant_category", "channel", "three_ds_result"]
-MODEL_COLS = FEATURE_COLS + CAT_COLS
+# Import centralized configuration. Previously this module hardcoded its own
+# 14-column FEATURE_COLS list that had drifted from config.py's 19-column
+# list (missing the v1.1 features), which is exactly what made the frozen
+# baseline re-scoring below crash on a feature-count mismatch. Importing the
+# same source of truth here eliminates that drift by construction.
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from config import (
+    FEATURE_COLS, CAT_COLS, MODEL_COLS, SMOTENC_SEED,
+    TRAIN_DF_PKL, VAL_DF_PKL, TEST_DF_PKL, TRAIN_DF_SMOTENC_PKL,
+    TRAIN_DF_CTGAN_PKL, XGB_TIER1_JSON, XGB_TIER1_SMOTENC_JSON,
+    XGB_TIER1_CTGAN_JSON, MODELS_ARTIFACTS, DATA_PROCESSED, ensure_directories,
+    XGB_DEVICE,
+)
+
+SEED = SMOTENC_SEED
 
 
 def build_features(train_df, val_df, test_df):
@@ -92,20 +101,20 @@ if __name__ == "__main__":
     print("=" * 80)
 
     # Real, untouched val/test -- identical to what the frozen baseline was scored on.
-    val_df = pd.read_pickle("data/processed/val_df.pkl")
-    test_df = pd.read_pickle("data/processed/test_df.pkl")
+    val_df = pd.read_pickle(VAL_DF_PKL)
+    test_df = pd.read_pickle(TEST_DF_PKL)
     y_val = val_df["is_fraud"].to_numpy()
     y_test = test_df["is_fraud"].to_numpy()
 
     # --- Baseline: reload the FROZEN model, do not retrain it ---
     baseline_model = xgb.XGBClassifier()
-    baseline_model.load_model("models_artifacts/xgboost_tier1.json")
+    baseline_model.load_model(str(XGB_TIER1_JSON))
     _, X_val_baseline, X_test_baseline = build_features(
-        pd.read_pickle("data/processed/train_df.pkl"), val_df, test_df
+        pd.read_pickle(TRAIN_DF_PKL), val_df, test_df
     )
 
     # --- New model: same hyperparameters, trained on SMOTENC-augmented train ---
-    train_df_smotenc = pd.read_pickle("data/processed/train_df_smotenc.pkl")
+    train_df_smotenc = pd.read_pickle(TRAIN_DF_SMOTENC_PKL)
     X_train_smc, X_val_smc, X_test_smc = build_features(train_df_smotenc, val_df, test_df)
     y_train_smc = train_df_smotenc["is_fraud"].to_numpy()
 
@@ -118,11 +127,12 @@ if __name__ == "__main__":
         n_estimators=300, max_depth=4, learning_rate=0.08,
         scale_pos_weight=float(scale_pos_weight), eval_metric="aucpr",
         subsample=0.8, colsample_bytree=0.8, random_state=SEED, tree_method="hist",
+        n_jobs=-1, device=XGB_DEVICE,
     )
     new_model.fit(X_train_smc, y_train_smc)
 
-    Path("models_artifacts").mkdir(parents=True, exist_ok=True)
-    new_model.save_model("models_artifacts/xgboost_tier1_smotenc.json")  # NEW path
+    ensure_directories()
+    new_model.save_model(str(XGB_TIER1_SMOTENC_JSON))  # NEW path
 
     baseline_metrics = evaluate_model(baseline_model, X_val_baseline, X_test_baseline,
                                       y_val, y_test, test_df,
@@ -135,8 +145,8 @@ if __name__ == "__main__":
     # Both the trained artifact AND its augmented pickle must be present;
     # the pickle can legitimately be cleaned up separately since the CTGAN
     # experiment is closed (see CHANGELOG).
-    ctgan_model_path = Path("models_artifacts/xgboost_tier1_ctgan_augmented.json")
-    ctgan_pickle_path = Path("data/processed/train_df_ctgan.pkl")
+    ctgan_model_path = XGB_TIER1_CTGAN_JSON
+    ctgan_pickle_path = TRAIN_DF_CTGAN_PKL
     ctgan_metrics = None
     if ctgan_model_path.exists() and ctgan_pickle_path.exists():
         ctgan_model = xgb.XGBClassifier()
@@ -165,5 +175,5 @@ if __name__ == "__main__":
     print(f"{'fn (count)':<16}" + "".join(f"{m['fn']:>18d}" for _, m in rows))
     delta = smotenc_metrics["pr_auc"] - baseline_metrics["pr_auc"]
     print(f"\nSMOTENC vs baseline overall PR-AUC delta: {delta:+.4f}")
-    print("\nSaved new model to: models_artifacts/xgboost_tier1_smotenc.json")
-    print("Frozen baseline (models_artifacts/xgboost_tier1.json) was not modified.")
+    print(f"\nSaved new model to: {XGB_TIER1_SMOTENC_JSON}")
+    print(f"Frozen baseline ({XGB_TIER1_JSON}) was not modified.")

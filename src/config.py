@@ -11,7 +11,6 @@ from pathlib import Path
 # =============================================================================
 # PATHS
 # =============================================================================
-from pathlib import Path
 
 # Project root:
 # C:\Users\HP\Desktop\fraud_model
@@ -26,6 +25,7 @@ MODELS_ARTIFACTS = PROJECT_ROOT / "models_artifacts"
 
 # Raw data files
 TRANSACTIONS_CSV = DATA_RAW / "transactions.csv"
+TRANSACTIONS_PARQUET = DATA_RAW / "transactions.parquet"  # faster read path (pyarrow)
 TRANSCRIPTS_JSONL = DATA_RAW / "transcripts.jsonl"
 GENERATION_LOG_CSV = DATA_RAW / "generation_log.csv"
 
@@ -41,6 +41,8 @@ X_TEST_PKL = DATA_PROCESSED / "X_test.pkl"
 # Augmented data files
 TRAIN_DF_SMOTENC_PKL = DATA_PROCESSED / "train_df_smotenc.pkl"
 SYNTHETIC_MINORITY_ROWS_SMOTENC_PKL = DATA_PROCESSED / "synthetic_minority_rows_smotenc.pkl"
+TRAIN_DF_CTGAN_PKL = DATA_PROCESSED / "train_df_ctgan.pkl"
+SYNTHETIC_MINORITY_ROWS_CTGAN_PKL = DATA_PROCESSED / "synthetic_minority_rows_ctgan.pkl"
 SYNTHETIC_FEEDBACK_ROWS_CSV = DATA_PROCESSED / "synthetic_feedback_rows.csv"
 
 # Model artifacts
@@ -99,7 +101,28 @@ XGB_PARAMS = {
     "colsample_bytree": 0.8,
     "random_state": 42,
     "tree_method": "hist",
+    "n_jobs": -1,  # use all CPU cores
 }
+
+# GPU accelerator: XGBoost is built with CUDA (see build_info USE_CUDA). Use it
+# automatically when a CUDA device is present (5-20x faster training on big
+# data); fall back to CPU silently otherwise so the same code runs anywhere.
+def _xgboost_device():
+    try:
+        import xgboost as xgb
+        if xgb.build_info().get("USE_CUDA"):
+            try:
+                xgb.XGBClassifier(n_estimators=1, tree_method="hist", device="cuda")
+                return "cuda"
+            except Exception:
+                return "cpu"
+    except Exception:
+        pass
+    return "cpu"
+
+XGB_DEVICE = _xgboost_device()
+if XGB_DEVICE == "cuda":
+    XGB_PARAMS["device"] = "cuda"
 
 # Threshold search
 THRESHOLD_CANDIDATES = 99
@@ -120,7 +143,7 @@ SMOTENC_SEED = 42
 # FEEDBACK LOOP CONFIGURATION
 # =============================================================================
 FEEDBACK_ROWS_PER_TYPE = 80
-FEEDBACK_MAX_CYCLES = 10
+FEEDBACK_MAX_CYCLES = 5
 FEEDBACK_SEED = 42
 FEEDBACK_STEER_STRENGTH = 0.3
 
@@ -170,7 +193,43 @@ FRAUD_TYPE_TARGETS = {
     "auth_bypass": 220,
     "bustout_identity": 450,
     "card_testing": 340,
+    "synthetic_identity": 100,  # NEW: KYC-002
+    "bnpl_abuse": 80,           # NEW: PR-003
 }
+
+# Average transactions per case, per fraud type. Used by the generator's
+# pool-sizing code to derive the right number of cases from FRAUD_TYPE_TARGETS.
+# Reflects each type's natural mechanic:
+#   card_testing       4-8  tx/case -> avg 6
+#   account_takeover   2-4  tx/case -> avg 3
+#   auth_bypass        1    tx/case -> 1
+#   bustout_identity   15-30 tx/case -> 22
+#   ai_impersonation   1    tx/case -> 1
+#   synthetic_identity 5-10 + 8-15 = 13-25 -> 19
+#   bnpl_abuse         10-25 tx/case -> 17
+AVG_TX_PER_CASE = {
+    "card_testing": 6,
+    "account_takeover": 3,
+    "auth_bypass": 1,
+    "bustout_identity": 22,
+    "ai_impersonation": 1,
+    "synthetic_identity": 19,
+    "bnpl_abuse": 17,
+}
+
+
+def pool_size_for(fraud_type):
+    """Derive the generator pool size (number of cases) from
+    `FRAUD_TYPE_TARGETS` and `AVG_TX_PER_CASE`. Single source of truth --
+    `rule_generator.py` reads this rather than hardcoding its own numbers.
+
+    Round-up so we always slightly overshoot the target instead of undershoot;
+    small over-coverage is acceptable noise in the temporal split.
+    """
+    import math
+    target = FRAUD_TYPE_TARGETS[fraud_type]
+    per_case = AVG_TX_PER_CASE[fraud_type]
+    return max(1, math.ceil(target / per_case))
 
 # =============================================================================
 # LLM GENERATOR CONFIGURATION

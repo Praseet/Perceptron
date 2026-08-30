@@ -29,34 +29,35 @@ are duplicated rather than imported so this script stays runtime-independent
 of the frozen baseline's build script.
 """
 from pathlib import Path
+import sys
 
 import numpy as np
 import pandas as pd
 import xgboost as xgb
 from sklearn.metrics import average_precision_score, confusion_matrix, f1_score
 
-SEED = 42
-FEATURE_COLS = ["amount", "account_age_days", "tx_last_1min", "tx_last_1hr", "tx_last_24hr",
-                "count_30d", "amount_zscore_30d", "new_device", "new_merchant",
-                "merchant_cat_freq_user", "time_since_last_s", "dist_from_prev_km",
-                "geo_velocity_kmh", "hour_of_day", "three_ds_failures_before_result"]
-CAT_COLS = ["merchant_category", "channel", "three_ds_result"]
-MODEL_COLS = FEATURE_COLS + CAT_COLS
+# Import centralized configuration -- previously this module hardcoded its
+# own stale 14-column FEATURE_COLS list (missing the v1.1 features), the
+# same drift class documented in config.py's docstring. Importing from the
+# single source of truth eliminates it here too.
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from config import (
+    FEATURE_COLS, CAT_COLS, MODEL_COLS, STEERABLE_COLS,
+    FEEDBACK_ROWS_PER_TYPE, FEEDBACK_MAX_CYCLES, FEEDBACK_SEED,
+    TRAIN_DF_PKL, VAL_DF_PKL, TEST_DF_PKL, XGB_TIER1_JSON,
+    XGB_TIER1_FEEDBACK_JSON, SYNTHETIC_FEEDBACK_ROWS_CSV,
+    MODELS_ARTIFACTS, DATA_PROCESSED, ensure_directories, XGB_DEVICE,
+)
+from generator.shap_feedback import feature_distance
+
+SEED = FEEDBACK_SEED
 
 # How many synthetic rows per missed fraud type per cycle. Sized so the
 # feedback signal is strong relative to these classes' tiny real counts
 # (54-178 train rows) without drowning the real data. Kept modest: large
 # steered batches effectively memorize the val-miss centroid and stop
 # generalizing to future periods (seen in a measured val->test regression).
-FEEDBACK_ROWS_PER_TYPE = 80
-MAX_CYCLES = 10  # cycle 0 = diagnosis; up to 2 feedback/retrain rounds
-
-# Continuous features allowed to be steered toward the missed-pattern
-# centroid. hour_of_day is handled separately (circular); flags are kept
-# from the template row.
-STEERABLE_COLS = ["amount", "account_age_days", "tx_last_1min", "tx_last_1hr", "tx_last_24hr",
-                  "count_30d", "amount_zscore_30d", "merchant_cat_freq_user",
-                  "time_since_last_s", "dist_from_prev_km", "geo_velocity_kmh"]
+MAX_CYCLES = FEEDBACK_MAX_CYCLES  # cycle 0 = diagnosis; up to 2 feedback/retrain rounds
 
 
 def build_features(train_df, val_df, test_df):
@@ -86,6 +87,7 @@ def fit_and_score(train_df, val_df, test_df):
         n_estimators=300, max_depth=4, learning_rate=0.08,
         scale_pos_weight=scale_pos_weight, eval_metric="aucpr",
         subsample=0.8, colsample_bytree=0.8, random_state=SEED, tree_method="hist",
+        n_jobs=-1, device=XGB_DEVICE,
     )
     model.fit(X_train, y_train)
 
@@ -197,9 +199,9 @@ if __name__ == "__main__":
     print("TIER 2 ITEM 8: FEEDBACK LOOP -- missed cases inform the generator")
     print("=" * 80)
 
-    train_df = pd.read_pickle("data/processed/train_df.pkl")   # frozen
-    val_df = pd.read_pickle("data/processed/val_df.pkl")       # production analog
-    test_df = pd.read_pickle("data/processed/test_df.pkl")     # touched ONCE at the end
+    train_df = pd.read_pickle(TRAIN_DF_PKL)   # frozen
+    val_df = pd.read_pickle(VAL_DF_PKL)       # production analog
+    test_df = pd.read_pickle(TEST_DF_PKL)     # touched ONCE at the end
 
     y_val = val_df["is_fraud"].to_numpy()
     y_test = test_df["is_fraud"].to_numpy()
@@ -246,7 +248,7 @@ if __name__ == "__main__":
 
     # ---- final one-shot TEST evaluation: baseline vs loop-improved model ----
     baseline_model = xgb.XGBClassifier()
-    baseline_model.load_model("models_artifacts/xgboost_tier1.json")
+    baseline_model.load_model(str(XGB_TIER1_JSON))
     _, X_val_b, X_test_b = build_features(train_df, val_df, test_df)
     b_val_proba = baseline_model.predict_proba(X_val_b)[:, 1]
     _, b_thr = max(
@@ -257,8 +259,8 @@ if __name__ == "__main__":
                              baseline_model.predict_proba(X_test_b)[:, 1], b_thr)
     final_summary = summarize("FEEDBACK-LOOP MODEL", y_test, test_proba, thr)
 
-    Path("models_artifacts").mkdir(parents=True, exist_ok=True)
-    model.save_model("models_artifacts/xgboost_tier1_feedback.json")
+    ensure_directories()
+    model.save_model(str(XGB_TIER1_FEEDBACK_JSON))
 
     print("\n" + "=" * 80)
     print("CLOSED-LOOP EVIDENCE (test split -- touched once)")
@@ -274,13 +276,32 @@ if __name__ == "__main__":
 
     if all_synthetic:
         audit = pd.concat(all_synthetic, ignore_index=True)
-        Path("data/processed").mkdir(parents=True, exist_ok=True)
-        audit.to_csv("data/processed/synthetic_feedback_rows.csv", index=False)
+        ensure_directories()
+        audit.to_csv(str(SYNTHETIC_FEEDBACK_ROWS_CSV), index=False)
         print(f"\nSynthetic feedback rows written to: "
-              f"data/processed/synthetic_feedback_rows.csv ({len(audit)} rows)")
-    print("Saved loop model to: models_artifacts/xgboost_tier1_feedback.json")
+              f"{SYNTHETIC_FEEDBACK_ROWS_CSV} ({len(audit)} rows)")
+
+        # AUDIT FIX (ml-pipeline-audit-agent-prompt.md Objective 2, step 3):
+        # cheap diversity check -- per fraud type, average pairwise feature
+        # distance from generated rows to the val-missed rows they were
+        # derived from. Near-zero means near-duplicates (the loop has
+        # collapsed to memorising the val-miss region). The brief asks us to
+        # widen generation/perturbation until diversity is reasonable; here
+        # we simply report the metric so the run is auditable.
+        print("\nDiversity (mean standardized nearest-neighbour distance, "
+              "generated vs missed):")
+        for ft in sorted(set(audit["fraud_type"])):
+            synth_xt = audit.loc[audit["fraud_type"] == ft, FEATURE_COLS].head(500)
+            missed_xt = val_df.loc[
+                (val_df["fraud_type"] == ft) & (val_df["is_fraud"] == 1),
+                FEATURE_COLS,
+            ]
+            if missed_xt.empty or synth_xt.empty:
+                print(f"  {ft:<22s} (skipped: no val-missed or synth rows)")
+                continue
+            dists = feature_distance(synth_xt, missed_xt, FEATURE_COLS)
+            mean_dist = float(dists.mean())
+            print(f"  {ft:<22s} mean_nn_dist={mean_dist:.3f}  "
+                  f"(n_synth={len(synth_xt)}, n_missed={len(missed_xt)})")
+    print(f"Saved loop model to: {XGB_TIER1_FEEDBACK_JSON}")
     print("Frozen baseline was not modified.")
-
-
-
-

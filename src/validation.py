@@ -17,7 +17,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent))
 from config import (
     FEATURE_COLS, CAT_COLS, MODEL_COLS, BINARY_FLAG_COLS,
-    STEERABLE_COLS
+    STEERABLE_COLS, CATEGORIES
 )
 
 
@@ -58,13 +58,20 @@ class DataValidator:
         "is_fraud": "int64",
     }
     
-    VALID_MERCHANT_CATEGORIES = [
-        "grocery", "restaurant", "retail", "online", "travel",
-        "entertainment", "utilities", "healthcare", "education", "other"
-    ]
-    
-    VALID_CHANNELS = ["online", "pos", "atm", "mobile"]
-    VALID_THREE_DS_RESULTS = ["success", "failure", "not_attempted", "attempted"]
+    # These three whitelists previously listed values the generator never
+    # actually produces (e.g. "retail"/"online"/"healthcare" categories,
+    # "pos"/"atm"/"mobile" channels, "success"/"failure" 3DS results) --
+    # only 3 of 10 category words matched real output, so wiring this
+    # validator in as-is would have fired false-positive warnings on every
+    # legitimate row. Verified against src/generator/rule_generator.py:
+    # CATEGORIES matches config.CATEGORIES exactly; channel is one of
+    # "card_present"/"ecom" (rule_generator.py, sample_normal_auth/event
+    # construction); three_ds_result is one of "passed_first_try"/
+    # "failed_then_passed"/"not_attempted" (sample_normal_auth()).
+    VALID_MERCHANT_CATEGORIES = list(CATEGORIES)
+
+    VALID_CHANNELS = ["card_present", "ecom"]
+    VALID_THREE_DS_RESULTS = ["passed_first_try", "failed_then_passed", "not_attempted"]
     
     NUMERIC_BOUNDS = {
         "amount": (0.01, 100000.0),

@@ -1,10 +1,9 @@
-<<<<<<< HEAD
 # fraud_model — Mastercard GenAI Payment Fraud Hackathon
 ## Identify / Generate / Defend
 
 Temporal-split fraud detection on synthetic transaction data with a
-two-tier detector, three data-generation paths, explainability, and a
-closed retraining feedback loop.
+two-tier detector, SMOTENC augmentation, explainability, and a closed
+retraining feedback loop.
 
 ## Pipeline order (run from repo root)
 
@@ -14,11 +13,10 @@ python src/models/train.py                # temporal split + FROZEN baseline xgb
 python src/models/anomaly.py              # Tier 2: isolation forest (unsupervised)
 python src/models/evaluate.py             # evaluation suite for frozen artifacts
 python src/models/explain.py              # Tier 2: SHAP global + local explanations
-python src/models/impersonation_diagnostics.py   # forensic audit of ai_impersonation misses
 
 # Imbalance experiments (all write NEW files; nothing frozen is modified)
 python src/models/smotenc_augment.py      # SMOTENC resampling of tiny fraud classes
-python src/models/smotenc_train.py        # head-to-head: baseline vs SMOTENC vs CTGAN
+python src/models/smotenc_train.py        # head-to-head: baseline vs SMOTENC
 
 # Feedback loop (Tier 2 item 8)
 python src/models/feedback_loop.py        # missed val cases -> generator -> retrain -> test once
@@ -32,17 +30,48 @@ and `transcripts.jsonl` end-to-end (rule-based simulator + LLM transcripts).
 
 ```
 data/raw/          transactions.csv, transcripts.jsonl, generation_log.csv
-data/processed/    feature pickles + *_smotenc / *_ctgan / synthetic_feedback_rows audit files
-models_artifacts/  xgboost_tier1.json (FROZEN baseline), *_smotenc/_ctgan/_feedback variants,
+data/processed/    feature pickles + *_smotenc / synthetic_feedback_rows audit files
+models_artifacts/  xgboost_tier1.json (FROZEN baseline), *_smotenc/_feedback variants,
                    isolation_forest_tier2.joblib, shap_*.png
 src/features/      engineering.py -- trailing-window velocity/aggregation features only
+src/fraud_model/   pipeline.py -- FraudPipeline (feature engineering + XGBoost)
+                   inference.py -- production inference service
 src/generator/     rule_generator.py (orchestrator + statistical attack simulators)
                    llm_generator.py (LLM transcript generation + validation)
-src/models/        train / evaluate / anomaly / explain / impersonation_diagnostics
-                   ctgan_augment, ctgan_train        -- CTGAN path (kept; see decision below)
+src/models/        train / evaluate / anomaly / explain
                    smotenc_augment, smotenc_train    -- SMOTENC path (primary)
                    feedback_loop                     -- closed loop, playbook Tier 2 item 8
 ```
+
+## Baseline metrics (frozen reference — DO NOT MODIFY)
+
+**Dataset:** 213,638 total transactions
+- normal: 212,387
+- bustout_identity: 484
+- card_testing: 363
+- auth_bypass: 240
+- account_takeover: 91
+- ai_impersonation: 73
+
+**Split (70/10/20 temporal by timestamp):**
+- Train: 149,546
+- Validation: 21,364
+- Test: 42,728
+
+**Tier 1 (XGBoost):**
+- Validation PR-AUC: 0.9458
+- Test PR-AUC: 0.9072
+- Frozen threshold: 0.96
+- Test Precision: 0.9044, Recall: 0.7834, F1: 0.8396
+- FP: 13, FN: 34
+
+**Tier 2 (Isolation Forest):**
+- Test PR-AUC: 0.3356
+- AI-impersonation PR-AUC: 0.0168 (hardest class for unsupervised)
+
+**Observation:** AI impersonation is the hardest fraud type — only 12 test
+transactions, 5 false negatives, PR-AUC 0.4538. SMOTENC augmentation
+raises this to 0.596 (see CHANGELOG.md v1.1.0).
 
 ## Leakage discipline (enforced everywhere)
 
@@ -52,22 +81,18 @@ src/models/        train / evaluate / anomaly / explain / impersonation_diagnost
 - Synthetic rows enter the TRAIN split only, and are auditable as files.
 - Feature engineering uses trailing windows / prior-row state exclusively.
 
-## Imbalance decision: SMOTENC primary, CTGAN kept for larger classes
+## Imbalance decision: SMOTENC primary
 
 Measured on the real run: CTGAN's own range-sanity gate rejected nearly
-everything it generated at this row count — `train_df_ctgan.pkl` contains
-only 2 accepted rows over the 149,546-row train set (ai_impersonation got
-zero). A GAN cannot learn a distribution from tens of examples; SMOTENC's
-k-NN interpolation degrades gracefully down to k+1 rows and honestly claims
-interpolation, not new signal.
+everything it generated at this row count — it cannot learn a distribution
+from tens of examples. SMOTENC's k-NN interpolation degrades gracefully
+down to k+1 rows and honestly claims interpolation, not new signal.
 
 - `smotenc_augment.py` resamples the RAW frame BEFORE `pd.get_dummies()`
   (categoricals + 0/1 flags declared via `categorical_features`, so
   majority-vote keeps them valid — never "37% online / 63% POS" rows).
 - Result: ai_impersonation PR-AUC 0.454 -> 0.596, overall PR-AUC
   0.9072 -> 0.9109, FN 34 -> 31 on the untouched test split.
-- CTGAN scripts stay for classes that one day reach hundreds of real rows;
-  both paths write separate pickles and compose cleanly.
 
 ## Feedback loop (playbook Tier 2 item 8)
 
@@ -76,51 +101,3 @@ AGGREGATE missed-pattern stats -> synthesize new attack rows from REAL
 train-split templates steered toward those misses -> retrain -> repeat ->
 evaluate ONCE on test. Val rows are never copied into training; TEST never
 informs anything until the final one-shot comparison. See CHANGELOG.md.
-
-=======
-# Baseline Experiment — 2026-08-26
-
-## Dataset
-Total transactions: 213,638
-
-Fraud:
-- normal: 212,387
-- account_takeover: 91
-- ai_impersonation: 73
-- auth_bypass: 240
-- bustout_identity: 484
-- card_testing: 363
-
-## Split
-Train: 149,546
-Validation: 21,364
-Test: 42,728
-
-## Tier 1
-Validation PR-AUC: 0.9458
-Test PR-AUC: 0.9072
-
-Frozen threshold: 0.96
-Precision: 0.9044
-Recall: 0.7834
-F1: 0.8396
-FP: 13
-FN: 34
-
-## AI Impersonation
-Test transactions: 12
-PR-AUC: 0.4538
-
-AI-impersonation false negatives: 5
-
-## Tier 2
-Isolation Forest Test PR-AUC: 0.3356
-AI-impersonation PR-AUC: 0.0168
-
-## Important observation
-AI impersonation remains substantially harder for the transaction model
-than bustout/card-testing fraud.
-
-## Status
-BASELINE — DO NOT MODIFY.
->>>>>>> 03cc991b4c6d0d51323b0baf4a2d27f9d1320eb4

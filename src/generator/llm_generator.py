@@ -425,6 +425,16 @@ PRETEXTS = [
     "cryptocurrency exchange account freeze",
     "government benefit re-verification",
     "landlord or rental deposit refund",
+    "card fraud alert on a recent transaction",
+    "charity donation drive after a natural disaster",
+    "health insurance premium refund processing",
+    "warranty extension for an expensive electronics purchase",
+    "interlibrary book transfer requiring a small fee",
+    "lost pet reward requiring an upfront processing fee",
+    "rental application credit check fee",
+    "college textbook buyback requiring shipping payment",
+    "social media account recovery verification",
+    "unclaimed government stimulus check release",
 ]
 
 # ---------- CHANGED: batched fraud-case generation ----------
@@ -441,6 +451,10 @@ TARGET_PERSONAS = [
     "someone less familiar with local bank procedures who defers to anyone who sounds official",
     "a person under financial stress who is more receptive to urgent money-related requests",
     "a confident, tech-savvy person who questions technical details but can still be swayed by specific-sounding jargon",
+    "a recent immigrant who is unfamiliar with local banking procedures and language barriers",
+    "a elderly person with cognitive decline who may be easily confused by technical jargon",
+    "a tech-savvy teenager who is curious about 'easy money' opportunities online",
+    "a single parent working multiple jobs who is exhausted and answers quickly",
 ]
 
 # CHANGED (was): BATCH_SYSTEM previously hard-coded "transaction_attempted MUST be
@@ -1294,8 +1308,20 @@ def materialize_llm_transaction(u, utx, params, case_id, users, merchant_ids,
     # New/unfamiliar device: more likely under a high-pressure pretext (victim
     # walked through installing something or authorizing from a new session).
     new_device_prob = {"high": 0.30, "medium": 0.15, "low": 0.05}.get(urgency, 0.15)
-    device_id = f"dev_{u}_new" if rng.random() < new_device_prob else f"dev_{u}_0"
+    
+    # Device: reuse the user's trusted device most of the time; occasionally a
+    # new/unfamiliar device under a high-pressure pretext. (No cross-user device
+    # reuse here -- keep it scoped to this user's own device history.)
+    if rng.random() < new_device_prob:
+        device_id = f"dev_{u}_new"
+    else:
+        device_id = f"dev_{u}_0"
 
+    # ANTI-LEAKAGE FIX: draw amount close to the user's normal spend so it overlaps
+    # the normal IQR. Old logic (typical * amount_multiplier) produced out-of-band
+    # amounts with 0% overlap. Keep a mild uplift for a plausible higher-value
+    # purchase that stays in the normal range.
+    amount = float(typical * rng.uniform(0.8, 1.8))
     # 3DS friction: a calm, well-rehearsed scammer script still tends to pass
     # first try, but higher urgency raises the odds of a fumbled/retried step.
     friction_prob = {"high": 0.35, "medium": 0.20, "low": 0.08}.get(urgency, 0.20)

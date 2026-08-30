@@ -1,0 +1,44 @@
+[
+  {
+    "fraud_type": "account_takeover",
+    "predicted_legit": 4,
+    "predicted_fraud": 17,
+    "total": 23
+  },
+  {
+    "fraud_type": "ai_impersonation",
+    "predicted_legit": 6,
+    "predicted_fraud": 9,
+    "total": 16
+  },
+  {
+    "fraud_type": "auth_bypass",
+    "predicted_legit": 6,
+    "predicted_fraud": 32,
+    "total": 41
+  },
+  {
+    "fraud_type": "bustout_identity",
+    "predicted_legit": 17,
+    "predicted_fraud": 60,
+    "total": 83
+  },
+  {
+    "fraud_type": "card_testing",
+    "predicted_legit": 6,
+    "predicted_fraud": 53,
+    "total": 64
+  },
+  {
+    "fraud_type": "synthetic_identity",
+    "predicted_legit": 5,
+    "predicted_fraud": 12,
+    "total": 18
+  },
+  {
+    "fraud_type": "bnpl_abuse",
+    "predicted_legit": 4,
+    "predicted_fraud": 10,
+    "total": 15
+  }
+]

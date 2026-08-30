@@ -1,0 +1,58 @@
+[
+  {
+    "fraud_type": "account_takeover",
+    "count": 120,
+    "precision": 0.92,
+    "recall": 0.81,
+    "pr_auc": 0.89,
+    "fpr": 0.011
+  },
+  {
+    "fraud_type": "ai_impersonation",
+    "count": 80,
+    "precision": 0.78,
+    "recall": 0.62,
+    "pr_auc": 0.596,
+    "fpr": 0.027
+  },
+  {
+    "fraud_type": "auth_bypass",
+    "count": 220,
+    "precision": 0.93,
+    "recall": 0.84,
+    "pr_auc": 0.91,
+    "fpr": 0.008
+  },
+  {
+    "fraud_type": "bustout_identity",
+    "count": 450,
+    "precision": 0.87,
+    "recall": 0.78,
+    "pr_auc": 0.85,
+    "fpr": 0.022
+  },
+  {
+    "fraud_type": "card_testing",
+    "count": 340,
+    "precision": 0.96,
+    "recall": 0.90,
+    "pr_auc": 0.94,
+    "fpr": 0.005
+  },
+  {
+    "fraud_type": "synthetic_identity",
+    "count": 100,
+    "precision": 0.82,
+    "recall": 0.70,
+    "pr_auc": 0.80,
+    "fpr": 0.024
+  },
+  {
+    "fraud_type": "bnpl_abuse",
+    "count": 80,
+    "precision": 0.86,
+    "recall": 0.74,
+    "pr_auc": 0.83,
+    "fpr": 0.015
+  }
+]

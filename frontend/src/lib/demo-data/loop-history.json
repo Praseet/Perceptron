@@ -1,0 +1,26 @@
+[
+  {
+    "run_id": "run-2026-08-29-001",
+    "started_at": "2026-08-29T14:30:00Z",
+    "duration_s": 312,
+    "final_pr_auc": 0.9089,
+    "n_cycles": 1,
+    "n_new_attacks": 50
+  },
+  {
+    "run_id": "run-2026-08-28-002",
+    "started_at": "2026-08-28T11:15:00Z",
+    "duration_s": 287,
+    "final_pr_auc": 0.9072,
+    "n_cycles": 1,
+    "n_new_attacks": 50
+  },
+  {
+    "run_id": "run-2026-08-27-001",
+    "started_at": "2026-08-27T16:42:00Z",
+    "duration_s": 195,
+    "final_pr_auc": 0.9051,
+    "n_cycles": 1,
+    "n_new_attacks": 50
+  }
+]

@@ -31,34 +31,36 @@ The two paths compose: each writes its own augmented pickle and never
 modifies frozen artifacts.
 """
 from pathlib import Path
+import sys
 
 import numpy as np
 import pandas as pd
 from imblearn.over_sampling import SMOTENC
 
-SEED = 42
-FEATURE_COLS = ["amount", "account_age_days", "tx_last_1min", "tx_last_1hr", "tx_last_24hr",
-                "count_30d", "amount_zscore_30d", "new_device", "new_merchant",
-                "merchant_cat_freq_user", "time_since_last_s", "dist_from_prev_km",
-                "geo_velocity_kmh", "hour_of_day", "three_ds_failures_before_result"]
-CAT_COLS = ["merchant_category", "channel", "three_ds_result"]
-MODEL_COLS = FEATURE_COLS + CAT_COLS
+# Import centralized configuration. Previously this module hardcoded its own
+# 14-column FEATURE_COLS list that had drifted from config.py's 19-column
+# list (missing the v1.1 features: three_ds_failures_last_30d,
+# device_trust_age_days, burst_count_10m, is_high_amount_burst,
+# inter_transaction_time_s). That drift is exactly why smotenc_train.py's
+# baseline re-scoring crashed on a feature-count mismatch -- importing the
+# same source of truth here eliminates the drift by construction.
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from config import (
+    FEATURE_COLS, CAT_COLS, MODEL_COLS, BINARY_FLAG_COLS,
+    SMOTENC_K_NEIGHBORS, SMOTENC_TARGET_CLASSES, SMOTENC_SEED,
+    TRAIN_DF_PKL, TRAIN_DF_SMOTENC_PKL, SYNTHETIC_MINORITY_ROWS_SMOTENC_PKL,
+    ensure_directories,
+)
 
-# new_device/new_merchant are 0/1 flags -- declared categorical alongside the
-# true categoricals so majority-vote keeps them integral (same reasoning as
-# ctgan_augment.py's DISCRETE_COLS).
-BINARY_FLAG_COLS = ["new_device", "new_merchant"]
+SEED = SMOTENC_SEED
 
 # Same two classes CTGAN targeted: weakest per-fraud-type PR-AUC in the
 # frozen Tier 1 eval and near-total FN concentration. account_takeover (68
 # rows) stays untouched -- it was already well separated (PR-AUC ~0.995),
 # and adding synthetic rows there only risks diluting real signal.
-TARGET_CLASSES = {
-    "ai_impersonation": 200,  # counts are desired totals AFTER resampling
-    "auth_bypass": 200,
-}
+TARGET_CLASSES = SMOTENC_TARGET_CLASSES
 
-K_NEIGHBORS = 5  # needs min(class_size) >= k+1 = 6; smallest targeted class has 54
+K_NEIGHBORS = SMOTENC_K_NEIGHBORS  # needs min(class_size) >= k+1 = 6; smallest targeted class has 54
 
 
 def _label_encode_categoricals(X_raw):
@@ -163,7 +165,7 @@ if __name__ == "__main__":
     print("TIER 2: SMOTENC SYNTHETIC MINORITY AUGMENTATION")
     print("=" * 80)
 
-    train_df = pd.read_pickle("data/processed/train_df.pkl")  # frozen, read-only here
+    train_df = pd.read_pickle(TRAIN_DF_PKL)  # frozen, read-only here
     print(f"Loaded frozen train_df: {len(train_df):,} rows")
 
     synthetic_df, info = generate_synthetic_minority_rows(train_df)

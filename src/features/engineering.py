@@ -1,6 +1,13 @@
+import os
 from pathlib import Path
+import sys
 import numpy as np
 import pandas as pd
+
+# Import centralized configuration (for the default train-only cutoff used
+# by the leakage-safe global fallback stat -- see add_features()).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from config import TRAIN_QUANTILE
 
 def rolling_sum_trailing(ts_int, values, window_seconds):
     ts_int = np.asarray(ts_int, dtype=np.int64)
@@ -16,7 +23,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
     a = np.sin((lat2r - lat1r) / 2) ** 2 + np.cos(lat1r) * np.cos(lat2r) * np.sin((lon2r - lon1r) / 2) ** 2
     return R * 2 * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
 
-def add_features(df):
+def add_features(df, fit_mask=None):
     """
     Adds base + user-level temporal / behavioural features.
 
@@ -32,6 +39,22 @@ def add_features(df):
         burst_count                  - rolling count of high-amount txns
         inter_transaction_time_s     - time gap between consecutive user txns
         is_high_amount_burst         - flag for rapid-fire >$1k sequence
+
+    Leakage note (fixed): `amount_zscore_30d` falls back to a GLOBAL
+    mean/std whenever a row has no trailing-30-day history yet
+    (`count_30d == 0` -- disproportionately first-ever transactions, where
+    fraud types like account_takeover/bustout_identity concentrate). That
+    global mean/std must never be computed over val/test rows, or the
+    fallback leaks future information into the split boundary.
+
+    `fit_mask`: boolean array/Series, same length and row-order as `df`,
+    marking which rows are allowed to contribute to the global fallback
+    mean/std. Pass the same boolean mask you use to build the TRAIN split
+    downstream. If omitted (e.g. when running this module standalone,
+    before any split exists), a train-only mask is derived internally
+    using the same time-quantile convention as train.py
+    (`config.TRAIN_QUANTILE`), so the fallback never sees "future" rows
+    even in that mode.
     """
     df = df.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="raise")
@@ -44,9 +67,9 @@ def add_features(df):
 
     tx_1min = np.zeros(len(df)); tx_1hr = np.zeros(len(df)); tx_24hr = np.zeros(len(df))
     sum_30d = np.zeros(len(df)); sum2_30d = np.zeros(len(df)); count_30d = np.zeros(len(df))
+    s30 = np.zeros(len(df)); s2_30d_raw = np.zeros(len(df))
     new_device = np.zeros(len(df), dtype=int); new_merchant = np.zeros(len(df), dtype=int)
     cat_freq = np.zeros(len(df), dtype=float)
-    prev_ts = np.full(len(df), np.nan); prev_lat = np.full(len(df), np.nan); prev_lon = np.full(len(df), np.nan)
 
     lat_arr = df["lat"].to_numpy(dtype=float)
     lon_arr = df["lon"].to_numpy(dtype=float)
@@ -62,60 +85,53 @@ def add_features(df):
         threeds_30d[idx] = rolling_sum_trailing(ts_int[idx], threeds_failure_ind[idx], 30 * 86400)
     df["three_ds_failures_last_30d"] = threeds_30d
 
-    # ---- main per-user loop: compute all rolling & lag features ----
+    # ---- main per-user features (VECTORIZED - same output, no per-row Python) ----
+    # Lags: previous-row ts/lat/lon within the same user (NaN for first row).
+    # NOTE: prev_ts shifts the SECONDS column (_ts_int), not datetime64[ns] --
+    # the old loop worked in seconds and downstream math expects the same unit.
+    df["_ts_int"] = ts_int
+    prev_ts = df.groupby("user_id", sort=False)["_ts_int"].shift(1).to_numpy()
+    prev_lat = df.groupby("user_id", sort=False)["lat"].shift(1).to_numpy()
+    prev_lon = df.groupby("user_id", sort=False)["lon"].shift(1).to_numpy()
+    # "new" flags: differs from the immediately-previous row of the same user.
+    new_device = (
+        df["device_id"] != df.groupby("user_id", sort=False)["device_id"].shift(1)
+    ).fillna(True).astype(int).to_numpy()
+    new_merchant = (
+        df["merchant_id"] != df.groupby("user_id", sort=False)["merchant_id"].shift(1)
+    ).fillna(True).astype(int).to_numpy()
+
+    # Rolling windows over PRIOR rows only (excludes the current row, exactly like
+    # the old `past = ts_u[:j]` masks). Per-user numpy calls -- no per-row loop.
     for _, idx in df.groupby("user_id", sort=False).indices.items():
         idx = np.asarray(idx)
         ts_u = ts_int[idx]
-        amt_u = amount[idx]
-        lat_u = lat_arr[idx]
-        lon_u = lon_arr[idx]
-        dev_u = dev_arr[idx]
-        merch_u = merch_arr[idx]
-        cat_u = cat_arr[idx]
+        tx_1min[idx] = rolling_sum_trailing(ts_u, one[idx], 60)
+        tx_1hr[idx] = rolling_sum_trailing(ts_u, one[idx], 3600)
+        tx_24hr[idx] = rolling_sum_trailing(ts_u, one[idx], 86400)
+        count_30d[idx] = rolling_sum_trailing(ts_u, one[idx], 30 * 86400)
+        s30[idx] = rolling_sum_trailing(ts_u, amount[idx], 30 * 86400)
+        s2_30d_raw[idx] = rolling_sum_trailing(ts_u, amount_sq[idx], 30 * 86400)
 
-        for j, pos in enumerate(idx):
-            now = ts_u[j]
-            past = ts_u[:j]
-            if j == 0:
-                prev_ts[pos] = np.nan
-                prev_lat[pos] = np.nan
-                prev_lon[pos] = np.nan
-            else:
-                prev_ts[pos] = ts_u[j - 1]
-                prev_lat[pos] = lat_u[j - 1]
-                prev_lon[pos] = lon_u[j - 1]
+    # Replicate the exact sum_30d/sum2_30d semantics of the old loop:
+    #   len>1 & sd>0 : sum_30d=mean, sum2_30d=sample-var   (else both stay 0)
+    #   len==1       : sum_30d=single value, sum2_30d=0
+    #   len==0       : both 0
+    mean30 = np.where(count_30d > 0, s30 / np.maximum(count_30d, 1), 0.0)
+    var_num30 = np.maximum(s2_30d_raw - count_30d * mean30 * mean30, 0.0)
+    sd_pos30 = (count_30d > 1) & (var_num30 > 0)
+    sum_30d = np.where(count_30d == 1, s30, np.where(sd_pos30, mean30, 0.0))
+    sum2_30d = np.where(sd_pos30, var_num30 / np.maximum(count_30d - 1, 1), 0.0)
 
-            window_1min = now - 60
-            window_1hr = now - 3600
-            window_24hr = now - 86400
-
-            mask_1m = past >= window_1min
-            mask_1h = past >= window_1hr
-            mask_24h = past >= window_24hr
-
-            tx_1min[pos] = mask_1m.sum()
-            tx_1hr[pos] = mask_1h.sum()
-            tx_24hr[pos] = mask_24h.sum()
-
-            window_30d = now - 30 * 86400
-            mask_30d = past >= window_30d
-            vals_30d = amt_u[:j][mask_30d]
-            count_30d[pos] = len(vals_30d)
-            if len(vals_30d) > 1:
-                m = vals_30d.mean()
-                sd = vals_30d.std(ddof=1)
-                if sd > 0:
-                    sum_30d[pos] = m
-                    sum2_30d[pos] = ((vals_30d - m) ** 2).sum() / (len(vals_30d) - 1)
-            elif len(vals_30d) == 1:
-                sum_30d[pos] = vals_30d[0]
-                sum2_30d[pos] = 0.0
-
-            new_device[pos] = 1 if (j == 0 or dev_u[j] != dev_u[j - 1]) else 0
-            new_merchant[pos] = 1 if (j == 0 or merch_u[j] != merch_u[j - 1]) else 0
-
-            if j > 0:
-                cat_freq[pos] = np.sum(cat_u[:j] == cat_u[j]) / j
+    # merchant_cat_freq_user = fraction of PRIOR rows of the same user+category.
+    prior_same_cat = (
+        df.assign(_c=1)
+        .groupby(["user_id", "merchant_category"], sort=False)["_c"]
+        .cumsum()
+        - 1
+    ).to_numpy()
+    j_within = df.groupby("user_id", sort=False).cumcount().to_numpy()
+    cat_freq = np.where(j_within > 0, prior_same_cat / j_within, 0.0)
 
     df["tx_last_1min"] = tx_1min
     df["tx_last_1hr"] = tx_1hr
@@ -125,8 +141,21 @@ def add_features(df):
     df["new_merchant"] = new_merchant
     df["merchant_cat_freq_user"] = cat_freq
 
-    mean_amt = np.mean(amount)
-    std_amt = max(np.std(amount), 1e-9)
+    # ---- leakage-safe global fallback stats (train-only) ----
+    if fit_mask is None:
+        # No explicit split provided: derive one internally using the same
+        # temporal-quantile convention train.py uses, so the fallback stat
+        # is still never computed over what will become val/test rows.
+        cut1 = np.quantile(ts_int, TRAIN_QUANTILE)
+        fit_mask_arr = ts_int <= cut1
+    else:
+        fit_mask_arr = np.asarray(fit_mask, dtype=bool)
+        if fit_mask_arr.shape[0] != len(df):
+            raise ValueError("fit_mask length must match df length "
+                             f"({fit_mask_arr.shape[0]} != {len(df)}).")
+
+    mean_amt = np.mean(amount[fit_mask_arr])
+    std_amt = max(np.std(amount[fit_mask_arr]), 1e-9)
     # Avoid division by zero: replace sum2_30d=0 with small epsilon
     denom = np.sqrt(np.where(sum2_30d > 0, sum2_30d / np.maximum(count_30d - 1, 1), 1.0))
     df["amount_zscore_30d"] = np.where(count_30d > 0,
@@ -147,14 +176,13 @@ def add_features(df):
     df["hour_of_day"] = df["timestamp"].dt.hour
 
     # ---- NEW: device trust age (seconds since THIS device's last use) ----
-    device_age_s = np.full(len(df), np.nan)
-    for _, idx in df.groupby("user_id", sort=False).indices.items():
-        idx = np.asarray(idx)
-        last_seen = {}
-        for pos in idx:
-            d = dev_arr[pos]
-            device_age_s[pos] = ts_int[pos] - last_seen[d] if d in last_seen else np.nan
-            last_seen[d] = ts_int[pos]
+    # ---- device trust age (seconds since THIS device's last use for this user) ----
+    # Same semantics as the old per-row dict loop: within (user, device), the gap
+    # to the previous use; NaN when the device is first seen for that user.
+    device_age_s = (
+        df.groupby(["user_id", "device_id"], sort=False)["_ts_int"].diff().to_numpy()
+    )
+    df.drop(columns=["_ts_int"], inplace=True)
     df["device_trust_age_s"] = device_age_s
     df["device_trust_age_days"] = device_age_s / 86400.0
 
@@ -175,9 +203,59 @@ def add_features(df):
     return df
 
 if __name__ == "__main__":
-    df = pd.read_csv("data/raw/transactions.csv")
+    from config import (
+        TRANSACTIONS_CSV, TRANSACTIONS_PARQUET, TRANSACTIONS_FEATURES_PKL,
+        ensure_directories,
+    )
+
+    # Fast path: read the parquet twin if present (pyarrow), else CSV.
+    if TRANSACTIONS_PARQUET.exists():
+        df = pd.read_parquet(TRANSACTIONS_PARQUET)
+    else:
+        df = pd.read_csv(TRANSACTIONS_CSV)
+
+    # Pre-flight schema/quality check (see src/validation.py). Non-fatal by
+    # default: this catches generator drift (unexpected category/channel
+    # values, missing columns, null spikes) loudly in stdout rather than
+    # silently propagating into feature engineering.
+    try:
+        from validation import validate_raw_data
+        results = validate_raw_data(df, strict=False)
+        errors = [r for r in results if r.severity.value == "error"]
+        if errors:
+            print(f"[validation] {len(errors)} error(s) in raw data -- see details below:")
+            for r in errors:
+                print(f"  ERROR [{r.check_name}] {r.message}")
+        elif results:
+            print(f"[validation] raw data passed with {len(results)} warning/info note(s).")
+        else:
+            print("[validation] raw data passed all checks.")
+    except ImportError:
+        print("[validation] src/validation.py not importable -- skipping pre-flight check.")
+
     df = add_features(df)
-    Path("data/processed").mkdir(parents=True, exist_ok=True)
-    df.to_pickle("data/processed/transactions_features.pkl")
+    ensure_directories()
+    # Atomic write: temp file + replace, so an interrupted run or a transient
+    # file lock (Windows Errno 22 on overwrite) can never corrupt the artifact.
+    tmp_pkl = TRANSACTIONS_FEATURES_PKL.with_name(TRANSACTIONS_FEATURES_PKL.name + ".tmp")
+    df.to_pickle(tmp_pkl)
+    # The destination can be transiently locked on Windows (AV/indexer) right
+    # after a big overwrite -- retry a few times before giving up.
+    import time
+    last_err = None
+    for attempt in range(6):
+        try:
+            os.replace(tmp_pkl, TRANSACTIONS_FEATURES_PKL)
+            last_err = None
+            break
+        except (PermissionError, OSError) as e:
+            last_err = e
+            time.sleep(1.5)
+            try:
+                TRANSACTIONS_FEATURES_PKL.unlink()
+            except (FileNotFoundError, PermissionError):
+                pass
+    if last_err is not None:
+        raise last_err
     print(df.shape)
     print(df.groupby("fraud_type").size())

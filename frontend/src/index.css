@@ -1,0 +1,128 @@
+@import "tailwindcss";
+
+@theme {
+  /* Background */
+  --bg-base:          #0A0E1A;   /* page background, deep navy-black */
+  --bg-panel:         #0F1626;   /* card / panel background */
+  --bg-elevated:      #161E33;   /* hover, focused, modals */
+  --bg-grid:          #0D1322;   /* subtle grid texture layer */
+
+  /* Borders */
+  --border-subtle:    #1F2A44;
+  --border-strong:    #2E3D5F;
+
+  /* Text */
+  --text-primary:     #E6ECFF;
+  --text-secondary:   #8B9DC3;
+  --text-muted:       #5A6B8A;
+  --text-mono:        #B8C5DD;   /* IDs, hashes, tx_ids */
+
+  /* Brand accent */
+  --accent-cyan:      #00D4FF;   /* links, focus rings */
+  --accent-cyan-dim:  #0088AA;   /* hover/disabled */
+
+  /* 3-tier status (locked) */
+  --status-safe:      #00FF88;
+  --status-warn:      #FFB800;
+  --status-threat:    #FF3D5A;
+
+  /* 5-tier risk spectrum (minimal/low/medium/high/critical) */
+  --risk-minimal:     #00FF88;   /* = --status-safe */
+  --risk-low:         #7ED957;   /* (completed here) green-amber midpoint */
+  --risk-medium:      #FFB800;   /* = --status-warn */
+  --risk-high:        #FF6B35;   /* (completed here) = --loop-attack, amber-red midpoint */
+  --risk-critical:    #FF3D5A;   /* = --status-threat */
+
+  /* Loop diagram legs */
+  --loop-attack:      #FF6B35;   /* Generate leg */
+  --loop-defend:      #00D4FF;   /* Defend leg */
+  --loop-identify:    #B47AFF;   /* Identify leg */
+  --loop-improve:     #00FF88;   /* Improve/feedback leg */
+
+  /* Typography */
+  --font-sans:    "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono:    "JetBrains Mono", "Fira Code", monospace;
+  --font-display: "Space Grotesk", "Inter", sans-serif;
+
+  /* Layout */
+  --radius-card:  8px;
+  --radius-input: 4px;
+  --radius-node:  0px;          /* loop diagram nodes only - sharp = technical */
+  --max-w-home:   1280px;
+  --max-w-docs:   1024px;
+}
+
+/* H.6.4: never remove the focus outline; 2px accent-cyan ring is the
+   minimum across all surfaces. */
+:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 2px;
+}
+
+/* H.2.5: .console is the narrow dark "instrument" surface used in
+   exactly two places - LoopDiagram in mode="live" and
+   ConversationTranscript. It re-skins the base/panel/elevated/border
+   tokens to a slightly darker and tighter shade so the embedded
+   surface reads as an instrument panel within the page, not a second
+   global theme. NEVER apply at page-root, body, or layout level. */
+.console {
+  --bg-base:     #06090F;
+  --bg-panel:    #0A0E1A;
+  --bg-elevated: #0F1626;
+  --border-subtle: #15203A;
+  --border-strong: #1F2A44;
+  background: var(--bg-base);
+}
+
+/* Phase 10 scrollbar fix: the cycle timeline and other
+   overflow-y-auto panels used to render a default white scrollbar
+   that broke the dark color pattern. Re-skin scrollbar tracks,
+   thumbs, and corners to use the locked dark tokens so any
+   scrollable surface stays inside the design system. The same
+   rules apply to both WebKit and Firefox. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-base);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 5px;
+  border: 2px solid var(--bg-base);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+::-webkit-scrollbar-corner {
+  background: var(--bg-base);
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) var(--bg-base);
+}
+
+/* Typography semantic classes (H.2.2: implemented as classes using
+   the locked font families, not as semantic tokens). Used by patterns
+   like KpiTile (--text-data-lg) and RiskBadge (--text-data). */
+.text-page-title  { font-family: var(--font-display); font-size: 2rem;    line-height: 1.15; font-weight: 600; letter-spacing: -0.01em; }
+.text-section-title { font-family: var(--font-display); font-size: 1.5rem; line-height: 1.2;  font-weight: 600; }
+.text-caption     { font-family: var(--font-sans);    font-size: 0.75rem; line-height: 1.3;  color: var(--text-muted); }
+.text-data        { font-family: var(--font-mono);    font-size: 0.875rem; font-variant-numeric: tabular-nums; }
+.text-data-lg     { font-family: var(--font-mono);    font-size: 1.75rem; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+/* Micro-bar (H.2.6: PerFraudTypeTable uses inline divs with this
+   color; no chart-1 token exists in Appendix D, so we use the
+   accent token which is semantically equivalent for the
+   "neutral data fill" role). */
+.micro-bar { background: var(--accent-cyan); height: 4px; border-radius: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

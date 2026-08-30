@@ -1,0 +1,46 @@
+[
+  {
+    "threshold": 0.3,
+    "precision": 0.263,
+    "recall": 0.911,
+    "f1": 0.4082,
+    "true_positives": 223,
+    "false_positives": 625,
+    "true_negatives": 212123,
+    "false_negatives": 22,
+    "alert_rate": 0.003981
+  },
+  {
+    "threshold": 0.5,
+    "precision": 0.9044,
+    "recall": 0.7834,
+    "f1": 0.8396,
+    "true_positives": 192,
+    "false_positives": 20,
+    "true_negatives": 212728,
+    "false_negatives": 53,
+    "alert_rate": 0.000995
+  },
+  {
+    "threshold": 0.7,
+    "precision": 0.924,
+    "recall": 0.349,
+    "f1": 0.5066,
+    "true_positives": 86,
+    "false_positives": 7,
+    "true_negatives": 212741,
+    "false_negatives": 159,
+    "alert_rate": 0.000437
+  },
+  {
+    "threshold": 0.9,
+    "precision": 0.995,
+    "recall": 0.069,
+    "f1": 0.1291,
+    "true_positives": 17,
+    "false_positives": 0,
+    "true_negatives": 212748,
+    "false_negatives": 228,
+    "alert_rate": 8e-05
+  }
+]

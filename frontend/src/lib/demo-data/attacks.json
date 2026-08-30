@@ -1,0 +1,227 @@
+[
+  {
+    "id": "SE-001",
+    "name": "Voice Clone Impersonation",
+    "category": "A",
+    "status": "partial",
+    "feasibility": 5,
+    "fraud_type": "ai_impersonation",
+    "generator_profile_id": "voice_clone_scam"
+  },
+  {
+    "id": "SE-002",
+    "name": "CEO Fraud Deepfake",
+    "category": "A",
+    "status": "conceptual",
+    "feasibility": 3,
+    "fraud_type": null,
+    "generator_profile_id": null
+  },
+  {
+    "id": "SE-003",
+    "name": "Romance Scam Automation",
+    "category": "A",
+    "status": "partial",
+    "feasibility": 5,
+    "fraud_type": "ai_impersonation",
+    "generator_profile_id": null
+  },
+  {
+    "id": "SE-004",
+    "name": "Customer Service Impersonation",
+    "category": "A",
+    "status": "partial",
+    "feasibility": 5,
+    "fraud_type": "ai_impersonation",
+    "generator_profile_id": null
+  },
+  {
+    "id": "SE-005",
+    "name": "Investment Scam Bot",
+    "category": "A",
+    "status": "partial",
+    "feasibility": 5,
+    "fraud_type": "ai_impersonation",
+    "generator_profile_id": null
+  },
+  {
+    "id": "SE-006",
+    "name": "Charity Fraud at Scale",
+    "category": "A",
+    "status": "implemented",
+    "feasibility": 5,
+    "fraud_type": null,
+    "generator_profile_id": null
+  },
+  {
+    "id": "KYC-001",
+    "name": "Deepfake Identity Verification",
+    "category": "B",
+    "status": "conceptual",
+    "feasibility": 3,
+    "fraud_type": null,
+    "generator_profile_id": null
+  },
+  {
+    "id": "KYC-002",
+    "name": "Synthetic Identity Creation",
+    "category": "B",
+    "status": "conceptual",
+    "feasibility": 5,
+    "fraud_type": "synthetic_identity",
+    "generator_profile_id": "synthetic_identity_basic"
+  },
+  {
+    "id": "KYC-003",
+    "name": "Document Forgery Automation",
+    "category": "B",
+    "status": "conceptual",
+    "feasibility": 3,
+    "fraud_type": null,
+    "generator_profile_id": null
+  },
+  {
+    "id": "KYC-004",
+    "name": "Account Farming Botnet",
+    "category": "B",
+    "status": "conceptual",
+    "feasibility": 4,
+    "fraud_type": "bustout_identity",
+    "generator_profile_id": null
+  },
+  {
+    "id": "KYC-005",
+    "name": "Biometric Spoofing",
+    "category": "B",
+    "status": "future",
+    "feasibility": 2,
+    "fraud_type": null,
+    "generator_profile_id": null
+  },
+  {
+    "id": "PR-001",
+    "name": "UPI Intent Hijacking",
+    "category": "C",
+    "status": "conceptual",
+    "feasibility": 3,
+    "fraud_type": "auth_bypass",
+    "generator_profile_id": null
+  },
+  {
+    "id": "PR-002",
+    "name": "QR Code Poisoning",
+    "category": "C",
+    "status": "conceptual",
+    "feasibility": 3,
+    "fraud_type": "auth_bypass",
+    "generator_profile_id": null
+  },
+  {
+    "id": "PR-003",
+    "name": "BNPL Identity Abuse",
+    "category": "C",
+    "status": "conceptual",
+    "feasibility": 5,
+    "fraud_type": "bnpl_abuse",
+    "generator_profile_id": "bnpl_max_out"
+  },
+  {
+    "id": "PR-004",
+    "name": "Cross-Border Arbitrage",
+    "category": "C",
+    "status": "conceptual",
+    "feasibility": 3,
+    "fraud_type": null,
+    "generator_profile_id": null
+  },
+  {
+    "id": "PR-005",
+    "name": "Subscription Creep",
+    "category": "C",
+    "status": "conceptual",
+    "feasibility": 4,
+    "fraud_type": "auth_bypass",
+    "generator_profile_id": null
+  },
+  {
+    "id": "AI-001",
+    "name": "Prompt Injection Fraud",
+    "category": "D",
+    "status": "novel",
+    "feasibility": 4,
+    "fraud_type": "ai_impersonation",
+    "generator_profile_id": null
+  },
+  {
+    "id": "AI-002",
+    "name": "Model Extraction Attack",
+    "category": "D",
+    "status": "conceptual",
+    "feasibility": 4,
+    "fraud_type": null,
+    "generator_profile_id": null
+  },
+  {
+    "id": "AI-003",
+    "name": "Adversarial Transaction Crafting",
+    "category": "D",
+    "status": "conceptual",
+    "feasibility": 4,
+    "fraud_type": "card_testing",
+    "generator_profile_id": null
+  },
+  {
+    "id": "AI-004",
+    "name": "LLM-Jacking",
+    "category": "D",
+    "status": "novel",
+    "feasibility": 5,
+    "fraud_type": "ai_impersonation",
+    "generator_profile_id": "llm_jacking"
+  },
+  {
+    "id": "AI-005",
+    "name": "Autonomous Fraud Agent",
+    "category": "D",
+    "status": "novel",
+    "feasibility": 4,
+    "fraud_type": null,
+    "generator_profile_id": null
+  },
+  {
+    "id": "BM-001",
+    "name": "Urgency Engineering",
+    "category": "E",
+    "status": "implemented",
+    "feasibility": 5,
+    "fraud_type": null,
+    "generator_profile_id": null
+  },
+  {
+    "id": "BM-002",
+    "name": "Trust Calibration",
+    "category": "E",
+    "status": "conceptual",
+    "feasibility": 3,
+    "fraud_type": null,
+    "generator_profile_id": null
+  },
+  {
+    "id": "BM-003",
+    "name": "Timing Optimization",
+    "category": "E",
+    "status": "conceptual",
+    "feasibility": 3,
+    "fraud_type": null,
+    "generator_profile_id": null
+  },
+  {
+    "id": "BM-004",
+    "name": "Multi-Channel Orchestration",
+    "category": "E",
+    "status": "conceptual",
+    "feasibility": 3,
+    "fraud_type": null,
+    "generator_profile_id": null
+  }
+]
