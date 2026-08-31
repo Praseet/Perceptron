@@ -69,7 +69,16 @@ export const useAppStore = create<AppState>((set) => ({
   commandPaletteOpen: false,
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
 
-  dataSource: "demo", // VITE_DEMO_MODE=true is the committed default
+  // Default to "live" iff the build was compiled with VITE_DEMO_MODE=false
+  // (the Phase 11 live cutover config). When VITE_DEMO_MODE is unset or
+  // "true", we fall back to the demo client so the bundled screenshot
+  // build still works without a backend. The committed .env.example
+  // keeps VITE_DEMO_MODE=true; only the gitignored frontend/.env flips
+  // it to false for local-dev against the real backend.
+  dataSource:
+    (import.meta.env.VITE_DEMO_MODE as string | undefined) === "false"
+      ? "live"
+      : "demo",
   setDataSource: (src) => set({ dataSource: src }),
 
   lastGeneratedTransactionId: null,

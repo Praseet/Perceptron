@@ -93,3 +93,5 @@ cline --id *.txt
 .turbo/
 *.log
 frontend/build.log
+frontend/dev.err
+*.log.*

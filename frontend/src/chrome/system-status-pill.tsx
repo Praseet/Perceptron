@@ -95,7 +95,11 @@ export function SystemStatusPill() {
   }
 
   const s = health.data?.status;
-  const nTx = status.data?.n_transactions;
+  // Prefer n_transactions_total (the full train+val+test count, ~1.06M)
+  // over n_transactions (which is just the test-split count, ~213k).
+  // The pill claims to report overall dataset size, so it should use
+  // the total -- not a single split.
+  const nTx = status.data?.n_transactions_total ?? status.data?.n_transactions;
   const text = statusToText(s, nTx);
   const color = statusToColor(s);
 
