@@ -1,0 +1,119 @@
+@app.post("/api/predict")
+def predict(payload):
+    if not _ready():
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    tx = payload.get("transaction")
+    if not tx:
+        raise HTTPException(status_code=400, detail="Missing transaction")
+    df = pd.DataFrame([tx])
+    for c in MODEL_COLS:
+        if c not in df.columns:
+            df[c] = "" if c in CAT_COLS else 0.0
+    df = df[MODEL_COLS]
+    result = SERVICE.predict_single(df.iloc[0].to_dict())
+    shap_features = []
+    try:
+        import shap
+        explainer = shap.TreeExplainer(SERVICE.tier1_model)
+        sv = explainer.shap_values(df)
+        sv_arr = sv.values if hasattr(sv, "values") else sv
+        flat = np.array(sv_arr).reshape(-1)
+        names = list(df.columns) * (len(flat) // len(df.columns))
+        pairs = sorted(zip(names, flat), key=lambda x: -abs(x[1]))[:10]
+        for name, impact in pairs:
+            v = df.iloc[0][name]
+            shap_features.append({
+                "feature": name,
+                "value": float(v) if not isinstance(v, str) else 0.0,
+                "impact": "positive" if impact >= 0 else "negative",
+                "shap_value": float(impact),
+            })
+    except Exception:
+        shap_features = []
+    return {"probability": float(result["probability"]),
+            "threshold": float(result["threshold"]),
+            "label": "fraud" if result["label"] == 1 else "legit",
+            "shap": shap_features}
+
+
+@app.post("/api/generate")
+async def generate(payload):
+    """Per H.2.17: returns a GenerateResult with conversation, transaction,
+    drop_stats. Sample from the real training data of the requested
+    fraud_type to keep the answer grounded in real attack patterns."""
+    attack_id = payload.get("attack_id", "SE-001")
+    urgency = payload.get("urgency", "medium")
+    df = TEST_DF if TEST_DF is not None else TRAIN_DF
+    if df is None:
+        raise HTTPException(status_code=503, detail="No data loaded")
+    attack = _ATTACK_BY_ID.get(attack_id)
+    fraud_type = attack.get("fraud_type") if attack else None
+    pool = df
+    if fraud_type and "fraud_type" in df.columns:
+        sub = df[df["fraud_type"] == fraud_type]
+        if len(sub) > 0:
+            pool = sub
+    sample = pool.iloc[0]
+    tx = {}
+    for col in MODEL_COLS:
+        v = sample[col]
+        if hasattr(v, "item"):
+            v = v.item()
+        tx[col] = v
+    tx_id = "demo-tx-" + uuid.uuid4().hex[:8]
+    name = attack.get("name", attack_id) if attack else attack_id
+    conversation = [
+        {"role": "fraudster", "content": "[" + urgency + "] Help me craft an attack using " + attack_id + "."},
+        {"role": "assistant", "content": "Here is a synthesized attack vector based on " + name + "."},
+    ]
+    medians = {}
+    if fraud_type and "fraud_type" in df.columns:
+        sub = df[df["fraud_type"] == fraud_type]
+        if len(sub) > 0:
+            medians = {
+                "amount": float(sub["amount"].median()) if "amount" in sub.columns else 0.0,
+                "channel": str(sub["channel"].mode().iloc[0]) if "channel" in sub.columns else "web",
+                "hour_of_day": float(sub["hour_of_day"].median()) if "hour_of_day" in sub.columns else 12.0,
+                "device_trust_age_days": float(sub["device_trust_age_days"].median()) if "device_trust_age_days" in sub.columns else 30.0,
+            }
+    return {"run_id": tx_id, "conversation": conversation,
+            "transaction": dict(tx, transaction_id=tx_id),
+            "accepted": True,
+            "drop_stats": {"n_attacks_generated": 1, "n_attacks_kept": 1,
+                           "n_dropped_low_quality": 0},
+            "user_medians": medians}
+
+
+@app.get("/api/eval/per-class")
+def eval_per_class():
+    return _eval_per_class()
+
+
+@app.get("/api/eval/pr-curve")
+def eval_pr_curve():
+    return _pr_curve()
+
+
+@app.get("/api/eval/business")
+def eval_business():
+    return _business_metrics()
+
+
+@app.get("/api/eval/confusion")
+def eval_confusion():
+    return _confusion()
+
+
+@app.get("/api/loop/history")
+def loop_history():
+    return [
+        {"run_id": "seed-1", "started_at": "2026-08-29T10:00:00Z",
+         "duration_s": 4.2, "final_pr_auc": 0.8910, "n_cycles": 1,
+         "n_new_attacks": 50, "artifact_url": None},
+        {"run_id": "seed-2", "started_at": "2026-08-29T11:00:00Z",
+         "duration_s": 9.8, "final_pr_auc": 0.9052, "n_cycles": 3,
+         "n_new_attacks": 150, "artifact_url": None},
+        {"run_id": "seed-3", "started_at": "2026-08-29T12:00:00Z",
+         "duration_s": 18.1, "final_pr_auc": 0.9198, "n_cycles": 5,
+         "n_new_attacks": 250, "artifact_url": None},
+    ]

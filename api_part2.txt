@@ -1,0 +1,109 @@
+def _eval_per_class():
+    if not _ready():
+        return []
+    from sklearn.metrics import average_precision_score
+    rows = []
+    df = TEST_DF
+    if "fraud_type" not in df.columns:
+        return rows
+    for ftype, grp in df.groupby("fraud_type"):
+        if grp["is_fraud"].sum() == 0:
+            continue
+        X = grp[MODEL_COLS]
+        y = grp["is_fraud"].to_numpy()
+        proba = SERVICE.predict_proba_array(X)
+        ap = float(average_precision_score(y, proba))
+        preds_class = (proba >= 0.5).astype(int)
+        tp = int(((preds_class == 1) & (y == 1)).sum())
+        fp = int(((preds_class == 1) & (y == 0)).sum())
+        tn = int(((preds_class == 0) & (y == 0)).sum())
+        fn = int(((preds_class == 0) & (y == 1)).sum())
+        fpr = fp / max(1, fp + tn)
+        prec = tp / max(1, tp + fp)
+        rec = tp / max(1, tp + fn)
+        rows.append({"fraud_type": str(ftype), "count": int(len(grp)),
+                     "precision": float(prec), "recall": float(rec),
+                     "pr_auc": float(ap), "fpr": float(fpr)})
+    return rows
+
+
+def _pr_curve():
+    if not _ready():
+        return {"precision": [], "recall": [], "thresholds": [],
+                "operating_point": {"precision": 0, "recall": 0, "threshold": 0.5}}
+    from sklearn.metrics import precision_recall_curve
+    X = TEST_DF[MODEL_COLS]
+    y = TEST_DF["is_fraud"].to_numpy()
+    proba = SERVICE.predict_proba_array(X)
+    prec, rec, thr = precision_recall_curve(y, proba)
+    idx = int(np.argmin(np.abs(thr - 0.5))) if len(thr) else 0
+    op_prec = float(prec[idx]) if idx < len(prec) else 0.0
+    op_rec = float(rec[idx]) if idx < len(rec) else 0.0
+    return {"precision": [float(p) for p in prec],
+            "recall": [float(r) for r in rec],
+            "thresholds": [float(t) for t in thr],
+            "operating_point": {"precision": op_prec, "recall": op_rec, "threshold": 0.5}}
+
+
+def _business_metrics():
+    if not _ready():
+        return []
+    rows = []
+    X = TEST_DF[MODEL_COLS]
+    y = TEST_DF["is_fraud"].to_numpy()
+    proba = SERVICE.predict_proba_array(X)
+    for thr in (0.30, 0.50, 0.70, 0.90):
+        preds = (proba >= thr).astype(int)
+        tp = int(((preds == 1) & (y == 1)).sum())
+        fp = int(((preds == 1) & (y == 0)).sum())
+        tn = int(((preds == 0) & (y == 0)).sum())
+        fn = int(((preds == 0) & (y == 1)).sum())
+        prec = tp / max(1, tp + fp)
+        rec = tp / max(1, tp + fn)
+        f1 = 2 * prec * rec / max(1e-9, prec + rec)
+        rows.append({"threshold": float(thr), "precision": float(prec),
+                     "recall": float(rec), "f1": float(f1),
+                     "true_positives": tp, "false_positives": fp,
+                     "true_negatives": tn, "false_negatives": fn,
+                     "alert_rate": float(preds.mean())})
+    return rows
+
+
+def _confusion():
+    if not _ready():
+        return []
+    rows = []
+    df = TEST_DF
+    if "fraud_type" not in df.columns:
+        return rows
+    X = df[MODEL_COLS]
+    proba = SERVICE.predict_proba_array(X)
+    preds = (proba >= 0.5).astype(int)
+    for ftype, grp in df.groupby("fraud_type"):
+        idx = grp.index
+        rows.append({"fraud_type": str(ftype),
+                     "predicted_legit": int(((preds[idx] == 0)).sum()),
+                     "predicted_fraud": int(((preds[idx] == 1)).sum()),
+                     "total": int(len(grp))})
+    return rows
+
+
+@app.get("/api/health")
+def health():
+    return {"status": "ok" if _ready() else "degraded",
+            "model_loaded": _ready(),
+            "data_loaded": TEST_DF is not None,
+            "n_users": int(len(TEST_DF)) if TEST_DF is not None else 0}
+
+
+@app.get("/api/attacks")
+def attacks():
+    return _ATTACKS
+
+
+@app.get("/api/attacks/{attack_id}")
+def attack_by_id(attack_id: str):
+    a = _ATTACK_BY_ID.get(attack_id)
+    if not a:
+        raise HTTPException(status_code=404, detail="Unknown attack_id " + attack_id)
+    return a

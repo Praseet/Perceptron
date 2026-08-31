@@ -711,7 +711,11 @@ def loop_artifact(run_id: str):
 
 
 def sse(payload):
-    return ("data: " + json.dumps(payload) + "\\n\\n").encode("utf-8")
+    # Real newlines, not escaped "\\n\\n" literals: the browser's SSE
+    # consumers split events on actual \n\n byte sequences. The escaped
+    # form put the entire stream on one line and every frontend parser
+    # saw zero events (Loop timeline stayed empty, live leg never moved).
+    return ("data: " + json.dumps(payload) + "\n\n").encode("utf-8")
 
 
 @app.get("/api/system/status")
