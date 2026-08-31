@@ -30,8 +30,8 @@ test("phase 6 - Identify renders all 25 attacks (zero hardcoded data)", async ({
   });
 
   await page.goto("/identify", { waitUntil: "networkidle" });
-  await expect(page.locator("[role=grid][aria-label='Attack list']")).toBeVisible({ timeout: 8000 });
-  const rows = page.locator("[role=grid][aria-label='Attack list'] tbody tr");
+  await expect(page.locator("[aria-label='Attack list']")).toBeVisible({ timeout: 8000 });
+  const rows = page.locator("[aria-label='Attack list'] tbody tr");
   await expect(rows).toHaveCount(25);
   await expect(page.locator("text=25 of 25 attacks").first()).toBeVisible();
   expect(consoleErrors).toEqual([]);
@@ -45,7 +45,7 @@ test("phase 6 - Identify renders all 25 attacks (zero hardcoded data)", async ({
 // Test 2: Category D's chip is the leftmost (spec acceptance #3).
 test("phase 6 - Category D chip is leftmost in the filter row", async ({ page }) => {
   await page.goto("/identify", { waitUntil: "networkidle" });
-  await expect(page.locator("[role=grid][aria-label='Attack list']")).toBeVisible();
+  await expect(page.locator("[aria-label='Attack list']")).toBeVisible();
   const filterRow = page.locator("button[role=button]").filter({
     hasText: /^[A-E] - /,
   });
@@ -61,10 +61,10 @@ test("phase 6 - Category D chip is leftmost in the filter row", async ({ page })
 // restores all rows (spec acceptance #2).
 test("phase 6 - category filter narrows, search adds, clear restores", async ({ page }) => {
   await page.goto("/identify", { waitUntil: "networkidle" });
-  await expect(page.locator("[role=grid][aria-label='Attack list']")).toBeVisible();
+  await expect(page.locator("[aria-label='Attack list']")).toBeVisible();
 
   await page.locator("button[role=button]").filter({ hasText: "D - AI-Specific" }).click();
-  const rows = page.locator("[role=grid][aria-label='Attack list'] tbody tr");
+  const rows = page.locator("[aria-label='Attack list'] tbody tr");
   await expect(rows).toHaveCount(5);
   await expect(page.locator("text=5 of 25 attacks").first()).toBeVisible();
 
@@ -82,7 +82,7 @@ test("phase 6 - category filter narrows, search adds, clear restores", async ({ 
 // (spec acceptance #6).
 test("phase 6 - empty state when filters match zero", async ({ page }) => {
   await page.goto("/identify", { waitUntil: "networkidle" });
-  await expect(page.locator("[role=grid][aria-label='Attack list']")).toBeVisible();
+  await expect(page.locator("[aria-label='Attack list']")).toBeVisible();
   await page
     .locator("input[placeholder='Search 25 attacks by name...']")
     .fill("zzz_no_match_string");
@@ -100,7 +100,7 @@ test("phase 6 - empty state when filters match zero", async ({ page }) => {
 // that attack on mount (spec acceptance #5).
 test("phase 6 - ?attack_id=SE-001 opens drawer for that attack on mount", async ({ page }) => {
   await page.goto("/identify?attack_id=SE-001", { waitUntil: "networkidle" });
-  await expect(page.locator("[role=grid][aria-label='Attack list']")).toBeVisible();
+  await expect(page.locator("[aria-label='Attack list']")).toBeVisible();
   const sheet = page.locator("aside, [role=dialog]").filter({ hasText: "SE-001" });
   await expect(sheet.first()).toBeVisible({ timeout: 5000 });
   const genBtn = page.locator("button", { hasText: "Generate a sample" });
@@ -112,7 +112,7 @@ test("phase 6 - ?attack_id=SE-001 opens drawer for that attack on mount", async 
 // a wired generator profile show the button").
 test("phase 6 - non-generator attack does not show Generate button", async ({ page }) => {
   await page.goto("/identify?attack_id=SE-002", { waitUntil: "networkidle" });
-  await expect(page.locator("[role=grid][aria-label='Attack list']")).toBeVisible();
+  await expect(page.locator("[aria-label='Attack list']")).toBeVisible();
   const sheet = page.locator("aside, [role=dialog]").filter({ hasText: "SE-002" });
   await expect(sheet.first()).toBeVisible({ timeout: 5000 });
   await expect(
@@ -124,7 +124,7 @@ test("phase 6 - non-generator attack does not show Generate button", async ({ pa
 // /generate?attack_id=SE-001 (spec acceptance #4).
 test("phase 6 - Generate a sample navigates to /generate?attack_id=...", async ({ page }) => {
   await page.goto("/identify?attack_id=SE-001", { waitUntil: "networkidle" });
-  await expect(page.locator("[role=grid][aria-label='Attack list']")).toBeVisible();
+  await expect(page.locator("[aria-label='Attack list']")).toBeVisible();
   const genBtn = page.locator("button", { hasText: "Generate a sample" }).first();
   await genBtn.click();
   await expect(page).toHaveURL(/\/generate\?attack_id=SE-001/);
@@ -134,8 +134,8 @@ test("phase 6 - Generate a sample navigates to /generate?attack_id=...", async (
 // toggles).
 test("phase 6 - clicking a column header toggles the sort", async ({ page }) => {
   await page.goto("/identify", { waitUntil: "networkidle" });
-  await expect(page.locator("[role=grid][aria-label='Attack list']")).toBeVisible();
-  const rows = page.locator("[role=grid][aria-label='Attack list'] tbody tr");
+  await expect(page.locator("[aria-label='Attack list']")).toBeVisible();
+  const rows = page.locator("[aria-label='Attack list'] tbody tr");
   await expect(rows.first()).toContainText("5/5");
 
   await page.locator("th", { hasText: "ID" }).click();
@@ -170,10 +170,10 @@ test("phase 6 - scaling: a 26th attack in the fixture shows 26 rows", async ({ p
     await page.goto("/identify", { waitUntil: "networkidle" });
     await page.reload({ waitUntil: "networkidle" });
     await expect(
-      page.locator("[role=grid][aria-label='Attack list']"),
+      page.locator("[aria-label='Attack list']"),
     ).toBeVisible();
     const rows = page.locator(
-      "[role=grid][aria-label='Attack list'] tbody tr",
+      "[aria-label='Attack list'] tbody tr",
     );
     await expect(rows).toHaveCount(26);
     await expect(page.locator("text=26 of 26 attacks").first()).toBeVisible();

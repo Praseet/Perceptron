@@ -104,6 +104,10 @@ test("phase 9 - unmounting /loop tears down the stream", async ({ page }) => {
 // gains a row at the top after a local run completes.
 test("phase 9 - RunHistoryTable gains a row after a local run", async ({ page }) => {
   await page.goto("/loop", { waitUntil: "networkidle" });
+  // Phase 11: the table is populated from the live backend's
+  // /api/loop/history response; wait for the first row to render
+  // before counting (race vs. the demo data fetch).
+  await page.locator("table tbody tr").first().waitFor({ timeout: 5000 });
   const beforeRunRows = await page.locator("table").last().locator("tbody tr").count();
   expect(beforeRunRows).toBeGreaterThan(0);
 
