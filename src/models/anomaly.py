@@ -41,7 +41,7 @@ from config import (
     ISO_FOREST_TIER2_JOBLIB, ISO_FOREST_CONFIG_JSON,
     ISO_FOREST_THRESHOLDS_CSV, FEEDBACK_QUEUE_CSV,
     XGB_TIER1_JSON, MODELS_ARTIFACTS, DATA_PROCESSED,
-    IF_PARAM_GRID, IF_FIXED_PARAMS, IF_N_SPLITS,
+    IF_PARAM_GRID, IF_FIXED_PARAMS, IF_N_SPLITS, IF_FEATURE_COLS,
     IF_CONTAMINATION_CANDIDATES, IF_NORMAL_PERCENTILES,
     IF_FEEDBACK_QUEUE_TOP_N,
 )
@@ -54,12 +54,26 @@ XGB_MODEL_PATH = Path(XGB_TIER1_JSON)
 FEEDBACK_QUEUE_PATH = Path(FEEDBACK_QUEUE_CSV)
 
 
+def _contract_matrix(df):
+    """P0.1 — explicit IF feature contract: reindex to IF_FEATURE_COLS only
+    (the 20 numeric behavioral features, no IDs / timestamps / labels). The
+    saved artifact was trained on exactly this column order; select_dtypes()
+    would silently feed user_id and is_fraud into the anomaly matrix.
+    """
+    return (
+        df.reindex(columns=IF_FEATURE_COLS, fill_value=0)
+        .astype(float)
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna(0.0)
+    )
+
+
 def _grid_search(train_df, val_df):
     """Grid-search structural hyperparameters on the val PR-AUC."""
     train_rows = train_df[train_df["is_fraud"] == 0]
-    X_train = train_rows.select_dtypes("number").to_numpy()
+    X_train = _contract_matrix(train_rows).to_numpy()
     y_val = val_df["is_fraud"].to_numpy()
-    X_val = val_df.select_dtypes("number").to_numpy()
+    X_val = _contract_matrix(val_df).to_numpy()
 
     best_params, best_score = None, -1.0
     all_results = []
@@ -91,8 +105,8 @@ def _grid_search(train_df, val_df):
 def _refit_and_freeze_threshold(train_df, val_df, best_params):
     """Refit on train-normal, freeze threshold on val."""
     train_rows = train_df[train_df["is_fraud"] == 0]
-    X_train = train_rows.select_dtypes("number").to_numpy()
-    X_val = val_df.select_dtypes("number").to_numpy()
+    X_train = _contract_matrix(train_rows).to_numpy()
+    X_val = _contract_matrix(val_df).to_numpy()
     y_val = val_df["is_fraud"].to_numpy()
 
     final_pipeline = Pipeline([
@@ -194,7 +208,7 @@ def train_isolation_forest():
     out.kv("Frozen threshold", f"{frozen_thr:.4f}")
 
     out.banner("Test evaluation")
-    test_risk = -final_pipeline.decision_function(test_df.select_dtypes("number").to_numpy())
+    test_risk = -final_pipeline.decision_function(_contract_matrix(test_df).to_numpy())
     y_test = test_df["is_fraud"].to_numpy()
     test_pred = (test_risk >= frozen_thr).astype(int)
     test_pr_auc = float(average_precision_score(y_test, test_risk))

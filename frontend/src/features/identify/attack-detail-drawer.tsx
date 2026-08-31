@@ -89,22 +89,23 @@ export function AttackDetailDrawer({
         </header>
 
         <Section title="Description">
-          {/* Per the spec: render what's available. The current
-              attacks.json does NOT carry a description field for
-              any entry, so this reads as a sentence explaining
-              what the drawer would show once a description field
-              is present. We do not fabricate one. */}
+          {/* Descriptions are sourced from the taxonomy prose in
+              docs/ATTACK_TAXONOMY.md and are now carried in the
+              unified attacks.json fixture, so the real description
+              renders for all 25 attacks. The fallback below stays on
+              guard for any row that lacks one (e.g. a transient
+              fixture mutation) so we never fabricate prose - we only
+              show what the source actually carries. */}
           {attack.description ? (
             <p className="text-[0.875rem] text-[var(--text-secondary)] leading-[1.6]">
               {attack.description}
             </p>
           ) : (
             <p className="text-[0.8125rem] text-[var(--text-muted)] italic">
-              No narrative description is carried in the unified
-              taxonomy fixture for this attack. The source
-              prose in <span className="font-mono">docs/ATTACK_TAXONOMY.md</span>
-              {" "}covers it; Phase 10 may add a description field
-              to <span className="font-mono">attacks.json</span>.
+              No description is carried in the fixture for this
+              attack. The source prose in{" "}
+              <span className="font-mono">docs/ATTACK_TAXONOMY.md</span>
+              {" "}covers it.
             </p>
           )}
         </Section>

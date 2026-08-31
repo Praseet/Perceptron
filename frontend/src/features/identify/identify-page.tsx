@@ -32,6 +32,7 @@ import {
 } from "./attack-filter-bar";
 import { AttackList } from "./attack-list";
 import { AttackDetailDrawer } from "./attack-detail-drawer";
+import { FraudTypeStrip } from "./fraud-type-strip";
 import type { Attack } from "../../lib/api/types";
 
 const HEADER_TITLE = "Identify";
@@ -102,6 +103,7 @@ export function IdentifyPage() {
         <ErrorState message={error instanceof Error ? error.message : "Unknown error"} />
       ) : (
         <>
+          <FraudTypeStrip />
           <AttackFilterBar filters={filters} onFiltersChange={setFilters} />
 
           {/* H.67 item #10: the list count is honest and small,

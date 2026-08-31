@@ -32,7 +32,7 @@ from config import (
     BUSINESS_THRESHOLDS,
     FEATURE_COLS, CAT_COLS, MODEL_COLS, BINARY_FLAG_COLS,
     XGB_TIER1_JSON, XGB_TIER1_SMOTENC_JSON, XGB_TIER1_FEEDBACK_JSON,
-    ISO_FOREST_TIER2_JOBLIB, ISO_FOREST_CONFIG_JSON,
+    ISO_FOREST_TIER2_JOBLIB, ISO_FOREST_CONFIG_JSON, IF_FEATURE_COLS,
     ensure_directories, get_feature_config,
 )
 from fraud_model.pipeline.pipeline import FraudPipeline, create_inference_pipeline
@@ -67,6 +67,7 @@ class FraudInferenceService:
         self.tier1_pipeline: Optional[FraudPipeline] = None
         self.tier2_model: Optional[Any] = None
         self.tier2_thresholds: Dict[str, float] = {}
+        self.tier2_novelty_quantiles = [1.0, 99.0]
         self._initialized = False
 
     def initialize(self) -> None:
@@ -103,16 +104,30 @@ class FraudInferenceService:
             return
         logger.info("Loading Tier 2 Isolation Forest from %s", self.tier2_path)
         self.tier2_model = joblib.load(self.tier2_path)
-        config_path = self.tier2_path.with_name("isolation_forest_tier2_config.json")
+        # P0.2 — the config file is isolation_forest_config.json (see
+        # config.ISO_FOREST_CONFIG_JSON). The old code looked for
+        # "isolation_forest_tier2_config.json" which does not exist, so the
+        # frozen threshold table was always empty.
+        config_path = (self.tier2_path.parent / "isolation_forest_config.json"
+                       if self.tier2_path.name == "isolation_forest_tier2.joblib"
+                       else self.tier2_path.with_name("isolation_forest_config.json"))
         if config_path.exists():
-            with open(config_path) as f:
-                config = json.load(f)
-                self.tier2_thresholds = config.get("frozen_threshold_table", {})
-                if not self.tier2_thresholds:
-                    pct = config.get("normalization_percentiles") or []
-                    self.tier2_thresholds = {f"p{int(p)}": float(v) for p, v in pct}
-        if "p99" not in self.tier2_thresholds and self.tier2_thresholds:
-            self.tier2_thresholds["p99"] = max(self.tier2_thresholds.values())
+            try:
+                with open(config_path, encoding="utf-8") as f:
+                    cfg = json.load(f)
+            except Exception as exc:
+                logger.error("Failed to parse Tier 2 config %s: %s", config_path, exc)
+                cfg = {}
+            self.tier2_thresholds = {}
+            if cfg.get("frozen_threshold") is not None:
+                self.tier2_thresholds["frozen"] = float(cfg["frozen_threshold"])
+            self.tier2_novelty_quantiles = cfg.get("normalization_percentiles") or [1.0, 99.0]
+        else:
+            self.tier2_thresholds = {}
+        if "frozen" not in self.tier2_thresholds:
+            logger.warning("No frozen_threshold in Tier 2 config; thresholds disabled")
+        else:
+            logger.info("Tier 2 frozen threshold = %s", self.tier2_thresholds["frozen"])
 
     def _validate_input_columns(self, df: pd.DataFrame) -> None:
         missing = [c for c in MODEL_COLS if c not in df.columns]
@@ -195,40 +210,74 @@ class FraudInferenceService:
     ) -> List[Dict[str, Any]]:
         """Run Tier 2 (Isolation Forest) on the feature matrix.
 
-        Returns a list of dicts (one per row) with anomaly_score, is_anomaly,
-        and ensemble_proba. The ensemble probability nudges Tier 1's score
-        upward when the isolation forest disagrees strongly.
+        P0.1 — Tier 2 uses an EXPLICIT feature contract (`IF_FEATURE_COLS`),
+        never `select_dtypes("number")`: the old path fed user_id, is_fraud
+        and other identifiers/labels into the anomaly matrix, which is both a
+        leakage hazard and a feature-order mismatch with the saved artifact.
+
+        P0.23 — returns a `novelty_percentile` relative to the stored normal
+        quantile range so the score can be explained and combined with Tier 1.
         """
         if self.tier2_model is None:
             return [
-                {"anomaly_score": 0.0, "is_anomaly": False, "ensemble_proba": float(p)}
+                {"anomaly_score": 0.0, "is_anomaly": False, "ensemble_proba": float(p),
+                 "novelty_percentile": None}
                 for p in tier1_probs
             ]
         try:
-            # Tier 2 expects raw numeric columns (same as used in anomaly.py training)
-            # Select only numeric columns from the raw input
-            X_numeric = df.select_dtypes("number").to_numpy()
-            anomaly_scores = -self.tier2_model.score_samples(X_numeric)
+            # Reindex to the exact training feature contract; missing columns
+            # are zero-filled so the artifact's feature order is always met.
+            X_numeric = df.reindex(columns=IF_FEATURE_COLS, fill_value=0).astype(float)
+            X_numeric = X_numeric.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            # Use -decision_function (NOT score_samples) so the score scale
+            # matches the artifact's frozen_threshold from anomaly.py.
+            anomaly_scores = -self.tier2_model.decision_function(X_numeric.to_numpy())
         except Exception as exc:
             logger.error("Tier 2 scoring failed, falling back to Tier 1 only: %s", exc)
             return [
-                {"anomaly_score": 0.0, "is_anomaly": False, "ensemble_proba": float(p)}
+                {"anomaly_score": 0.0, "is_anomaly": False, "ensemble_proba": float(p),
+                 "novelty_percentile": None}
                 for p in tier1_probs
             ]
 
-        threshold = self.tier2_thresholds.get("p99", 0.0)
+        # Map the raw anomaly score to a novelty percentile relative to the
+        # stored normal quantile range (P0.23). The frozen threshold from the
+        # isolation_forest_config.json is the operating boundary.
+        frozen = self.tier2_thresholds.get("frozen")
+        lo_q, hi_q = tuple(self.tier2_novelty_quantiles or [1.0, 99.0])
+        score_span = max(float(hi_q - lo_q), 1e-9)
         results: List[Dict[str, Any]] = []
         for score, prob in zip(anomaly_scores, tier1_probs):
-            is_anomaly = bool(score > threshold)
-            ensemble_proba = max(float(prob), float(is_anomaly) * 0.9)
+            if frozen is not None:
+                is_anomaly = bool(float(score) > float(frozen))
+            else:
+                is_anomaly = False
+            # Normalized percentile: 0 at the low normal bound, 100 at the
+            # high bound; everything below lo_q clamps to 0.
+            novelty = float(np.clip((float(score) - float(lo_q)) / score_span, 0.0, 1.0) * 100.0)
+            # P0.20 — Tier 1 and Tier 2 remain two separate decisions: the
+            # ensemble_proba field is informative only and is NOT used to
+            # override the calibrated Tier 1 probability.
+            ensemble_proba = float(prob)
             results.append(
                 {
                     "anomaly_score": float(score),
                     "is_anomaly": is_anomaly,
                     "ensemble_proba": ensemble_proba,
+                    "novelty_percentile": float(novelty),
                 }
             )
         return results
+
+    def score_tier2(self, df: pd.DataFrame) -> List[Dict[str, Any]]:
+        """Public Tier 2 anomaly scoring for already-engineered rows.
+
+        Accepts a dataframe with the MODEL_COLS feature set and returns one
+        dict per row with anomaly_score / is_anomaly / ensemble_proba /
+        novelty_percentile, using the explicit IF_FEATURE_COLS contract.
+        """
+        self.initialize()
+        return self._compute_tier2(df, [0.0] * len(df))
 
     def get_business_metrics(
         self,

@@ -18,6 +18,7 @@ import { Card, Skeleton } from "../../design-system/primitives";
 import { EmptyState } from "../../design-system/patterns/empty-state";
 import { PerFraudTypeTable } from "../../design-system/patterns/per-fraud-type-table";
 import { TransactionBuilderForm } from "./transaction-builder-form";
+import { ThresholdLine } from "./threshold-line";
 import { ProbabilityGauge } from "./probability-gauge";
 import { ShapWaterfall } from "./shap-waterfall";
 import { ConfusionHeatmap } from "./confusion-heatmap";
@@ -114,10 +115,18 @@ export function DefendPage() {
           </div>
         </div>
         {lastPrediction && (
-          <p className="text-[0.6875rem] font-mono text-[var(--text-muted)] tabular-nums">
-            Verdict: <span className="text-[var(--text-primary)]">{lastPrediction.prediction.label}</span>
-            {" "}- probability {formatPct(lastPrediction.prediction.probability, 2)}, threshold {lastPrediction.prediction.threshold.toFixed(2)}
-          </p>
+          <div className="space-y-1">
+            <p className="text-[0.6875rem] font-mono text-[var(--text-muted)] tabular-nums">
+              Verdict: <span className="text-[var(--text-primary)]">{lastPrediction.prediction.label}</span>
+              {" "}- probability {formatPct(lastPrediction.prediction.probability, 2)}, threshold {lastPrediction.prediction.threshold.toFixed(2)}
+            </p>
+            {/* Phase 12 (§12.17.6): probability + threshold + decision as one
+                glanceable number line; the dot animates to each new score. */}
+            <ThresholdLine
+              probability={lastPrediction.prediction.probability}
+              threshold={lastPrediction.prediction.threshold}
+            />
+          </div>
         )}
       </Card>
 

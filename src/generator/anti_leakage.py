@@ -17,6 +17,7 @@ FIXES:
 4. Add realistic noise/jitter to all fraud features
 """
 
+import sys
 import pandas as pd
 import numpy as np
 
@@ -73,8 +74,17 @@ if __name__ == "__main__":
         print(f"  {feat}: [{q25:.2f}, {q75:.2f}]")
     
     print("\nLeakage validation:")
+    all_ok = True
     for ft in ['card_testing', 'account_takeover', 'bustout_identity', 
                'synthetic_identity', 'bnpl_abuse', 'auth_bypass', 'ai_impersonation']:
         ok, msg = validate_no_leakage(df, ft, bounds)
         status = "PASS" if ok else "FAIL"
+        if not ok:
+            all_ok = False
         print(f"  {ft:20s}: {status} - {msg}")
+
+    print(f"\nAnti-leakage gate: {'PASS' if all_ok else 'FAIL'}")
+    # REAL GATE: fail loudly so run_pipeline.py (which checks the subprocess
+    # return code) actually stops on a leak, instead of printing FAIL and
+    # returning 0 as if nothing were wrong.
+    sys.exit(0 if all_ok else 1)

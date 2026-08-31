@@ -16,11 +16,18 @@
 // search param (/loop?prefill=1cycle), NOT via the Zustand store. The
 // one-time navigation hint lives in the URL, not cross-cutting state.
 
+// Phase 12 (§12.8.1): the active-route indicator is one shared element
+// (a small absolutely-positioned underline span) that ANIMATES ITS
+// POSITION via framer-motion's layoutId when the active route changes -
+// the same object moving between items, ~200ms easeOut. Quick, and
+// genuinely the same indicator, not a shared-element showcase effect.
 import { NavLink, useNavigate } from "react-router-dom";
+import { motion } from "framer-motion";
 import { ROUTES, type RoutePath } from "../lib/constants";
 import { SystemStatusPill } from "./system-status-pill";
 import { Button } from "../design-system/primitives";
 import { Play, ArrowRight } from "../design-system/icons";
+import { MOTION_EASE } from "../design-system/motion";
 
 interface NavItem {
   label: string;
@@ -36,9 +43,9 @@ const NAV_ITEMS: NavItem[] = [
 ];
 
 const linkBase =
-  "inline-flex items-center h-14 px-3 text-[0.8125rem] font-medium transition-colors duration-150";
+  "relative inline-flex items-center h-14 px-3 text-[0.8125rem] font-medium transition-colors duration-150";
 const linkIdle = "text-[var(--text-secondary)] hover:text-[var(--text-primary)]";
-const linkActive = "text-[var(--text-primary)] border-b-2 border-[var(--accent-cyan)]";
+const linkActive = "text-[var(--text-primary)]";
 
 export function TopNav() {
   const navigate = useNavigate();
@@ -82,7 +89,19 @@ export function TopNav() {
                 `${linkBase} ${isActive ? linkActive : linkIdle}`
               }
             >
-              {item.label}
+              {({ isActive }) => (
+                <>
+                  {item.label}
+                  {isActive && (
+                    <motion.span
+                      layoutId="nav-active-underline"
+                      aria-hidden
+                      className="absolute bottom-0 left-2 right-2 h-[2px] bg-[var(--accent-cyan)]"
+                      transition={{ duration: 0.2, ease: MOTION_EASE }}
+                    />
+                  )}
+                </>
+              )}
             </NavLink>
           ))}
         </nav>

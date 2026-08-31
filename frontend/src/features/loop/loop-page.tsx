@@ -1,31 +1,39 @@
 // Phase 9 - features/loop/loop-page.tsx
 // The real Loop page. Replaces the Phase 5 placeholder.
 //
-// Per the Phase 9 spec step 7:
-//   "loop-page.tsx - composes the header (exact copy),
-//    LoopControls, the left-60%/right-40% split
-//    (LoopLiveDiagram + CycleTimeline on the left,
-//    CycleDeltaTiles on the right), and RunHistoryTable
-//    full-width below. Ensure a run's completion appends a
-//    new row to the visible run history immediately (whether
-//    that's via TanStack Query cache invalidation
-//    triggering a refetch of getLoopHistory(), or an
-//    optimistic local append - either is fine, pick one and
-//    be consistent)."
+// Phase 12 (§12.7) - the page's own state machine drives the diagram:
+//   IDLE     -> LoopFlowScene mode="ambient" (auto-playing on mount)
+//   RUNNING  -> mode="live" events={run.events}
+//   SETTLING -> live showing the final state, ~1.75s hold
+//   IDLE     -> back to ambient (the loop closes)
+// Everything else (LoopControls, CycleTimeline, CycleDeltaTiles,
+// RunHistoryTable, use-loop) is unchanged. H.18.5's acceptance
+// criteria are preserved exactly: the Run button still disables while
+// a run is active, two simultaneous streams are still impossible, the
+// aria-live status summary and CycleTimeline rows are unchanged, and
+// RunHistoryTable still gets a new row on run_complete.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { LoopControls } from "./loop-controls";
-import {
-  LoopLiveDiagram,
-  activeLegForEvents,
-} from "./loop-live-diagram";
 import { CycleTimeline } from "./cycle-timeline";
 import { CycleDeltaTiles } from "./cycle-delta-tiles";
 import { RunHistoryTable } from "./run-history-table";
 import { useLoopHistory, useRunLoop } from "./use-loop";
 
 import type { LoopHistoryEntry, LoopRunRequest } from "../../lib/api/types";
+
+// Phase 12 (§12.6 + §12.9 step 2): LoopFlowScene is its own React.lazy
+// boundary, independent of KpiTile and of the page route chunks.
+const LoopFlowScene = lazy(() =>
+  import("../../design-system/patterns/loop-flow-scene").then((m) => ({
+    default: m.LoopFlowScene,
+  })),
+);
+
+// §12.5.5: after run_complete, hold the final state long enough to read
+// it, then hand the page back to the ambient loop.
+const SETTLE_MS = 1750;
 
 const HEADER_TITLE = "Loop";
 const HEADER_SUBTITLE =
@@ -35,16 +43,9 @@ const HEADER_STEP = "Step 4 of 4";
 export function LoopPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   // ?prefill=1cycle is set by the global nav's "Run the loop"
-  // button (Phase 5). When present, default max-cycles to 1
-  // and strip the param so a back-button doesn't re-prefill.
-  // ?prefill=1cycle is set by the global nav's "Run the loop"
   // button (Phase 5). Capture the value ONCE at first mount via
-  // useRef. Reading it on every render triggers React 19 +
-  // strict-mode re-init when our setSearchParams effect fires
-  // and changes the URL from /loop?prefill=1cycle back to
-  // /loop. With useRef, the captured value is stable for the
-  // lifetime of the LoopPage instance; subsequent renders see
-  // the same 1 even after prefill becomes null in the URL.
+  // useRef (see PROGRESS.md - reading it on every render triggered
+  // a React 19 + strict-mode re-init loop).
   const initialMaxCyclesRef = useRef<1 | 3 | 5>(
     searchParams.get("prefill") === "1cycle" ? 1 : 3,
   );
@@ -97,24 +98,32 @@ export function LoopPage() {
     return [...recentRuns, ...serverRows.filter((r) => !seen.has(r.run_id))];
   }, [recentRuns, historyQuery.data]);
 
-  // Phase 9 fix: derive the active leg as a stable primitive value
-  // from the events array. This is the single change that closes
-  // the "Maximum update depth exceeded" ReactFlow bug - the
-  // events array gets a new reference on every SSE/demo tick,
-  // but the active-leg STRING usually doesn't change. Passing the
-  // primitive into a memo(LoopLiveDiagram) means the diagram
-  // short-circuits re-renders on ticks where the active leg
-  // hasn't actually changed. See loop-live-diagram.tsx for the
-  // locked event-type-to-leg mapping; see PROGRESS.md for the
-  // full diagnosis.
-  const liveLeg = useMemo(
-    () => activeLegForEvents(run.events),
-    [run.events],
-  );
+  // Phase 12 §12.7 state machine. `run.isStreaming` is RUNNING;
+  // once a terminal event lands, SETTLING holds the live scene for
+  // SETTLE_MS so the final state is readable, then back to IDLE
+  // (ambient). The settle timer is cancelled by a new run starting.
+  const [settled, setSettled] = useState(false);
+  const phase: "idle" | "running" | "settling" = run.isStreaming
+    ? "running"
+    : run.isComplete
+      ? "settling"
+      : "idle";
+  useEffect(() => {
+    if (phase !== "settling") {
+      setSettled(false);
+      return;
+    }
+    const t = setTimeout(() => setSettled(true), SETTLE_MS);
+    return () => clearTimeout(t);
+  }, [phase]);
+  const sceneMode: "ambient" | "live" =
+    phase === "running" || (phase === "settling" && !settled) ? "live" : "ambient";
 
   function handleRun(req: LoopRunRequest) {
     run.start(req);
   }
+
+
 
   return (
     <div className="space-y-6">
@@ -136,15 +145,47 @@ export function LoopPage() {
         isRunning={run.isStreaming}
       />
 
-      {/* Phase 10 layout fix: the previous 3fr/2fr split squeezed the
-         four KPI tiles into a 2x2 grid in the narrower right column.
-         Each tile's number was cramped and overlapped the delta chip.
-         The new layout keeps the live diagram on the left, the cycle
-         timeline on the right, and the four delta tiles in their own
-         full-width 4-column row below. Each tile now reads cleanly
-         with plenty of room and no number collision. */}
+      {/* Phase 10 layout fix: the live diagram on the left, the cycle
+          timeline on the right, and the four delta tiles in their own
+          full-width 4-column row below. Phase 12: the diagram is now
+          LoopFlowScene, wrapped in the same .console instrument surface
+          the Home hero uses (one consistent frame for the signature
+          scene), with an honest mode caption beneath it. */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
-        <LoopLiveDiagram activeLeg={liveLeg} />
+        <div>
+          <div className="console border border-[var(--border-subtle)] rounded-[var(--radius-card)] p-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[0.625rem] font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
+                closed loop
+              </span>
+              <span className="text-[0.625rem] font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
+                {sceneMode === "live" ? "live run" : "ambient preview"}
+              </span>
+            </div>
+            <Suspense
+              fallback={
+                <div
+                  style={{
+                    aspectRatio: "1 / 1",
+                    background: "var(--bg-panel)",
+                    border: "1px solid var(--border-subtle)",
+                  }}
+                />
+              }
+            >
+              <LoopFlowScene
+                mode={sceneMode}
+                events={run.events}
+                ambientLabels={false}
+              />
+            </Suspense>
+          </div>
+          <p className="mt-2 text-[0.625rem] font-mono text-[var(--text-muted)] text-center">
+            {sceneMode === "live"
+              ? "Reacting to the real run in progress."
+              : "Illustrative preview - press Run for a live cycle."}
+          </p>
+        </div>
         <CycleTimeline
           events={run.events}
           streamError={run.error}

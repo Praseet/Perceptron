@@ -224,6 +224,11 @@ export interface SystemStatus {
   online: boolean;
   n_users: number;
   n_transactions: number;
+  /** Full train+val+test transaction count (~1.06M) when the backend
+   *  exposes it; n_transactions alone is the test-split count (~213k).
+   *  Optional so older backends without the field still type-check -
+   *  call sites fall back to n_transactions. */
+  n_transactions_total?: number;
   fraud_rate: number;
   pr_auc_test: number;
   last_retrain_at: string;

@@ -19,7 +19,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getApiClient } from "../../lib/api/client";
 import { useAppStore } from "../../lib/store";
 import { ROUTES, LOOP_LEGS, ATTACKS_QUERY_KEY } from "../../lib/constants";
-import { Layers, Sparkles, Activity, TrendingUp, ArrowRight } from "../../design-system/icons";
+import { Layers, Sparkles, Activity, TrendingUp, ArrowRight, ChevronRight } from "../../design-system/icons";
 import { useGenerateControls } from "../generate/use-generate-controls";
 import { GenerateControls } from "../generate/generate-controls";
 import { TransactionBuilderForm } from "../defend/transaction-builder-form";
@@ -36,13 +36,49 @@ export function PillarPreviewCards() {
       >
         See it work
       </h2>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* Phase 12 (§12.17.2): the row reads as ONE causal sequence, not
+          four independent tiles. On lg+ (single 4-col row) a short rule
+          with a chevron glyph sits between the cards; on narrower
+          layouts the cards stack and the connectors disappear (a
+          vertical arrow between stacked cards would read as noise).
+          Numbered 01-04 prefixes already on the cards do the ordering
+          work at every width. */}
+      <div className="hidden lg:grid grid-cols-[1fr_auto_1fr_auto_1fr_auto_1fr] items-stretch gap-3">
+        <IdentifyMini />
+        <PillarConnector />
+        <GenerateMini />
+        <PillarConnector />
+        <DefendMini />
+        <PillarConnector />
+        <ImproveMini />
+      </div>
+      <div className="lg:hidden grid grid-cols-1 sm:grid-cols-2 gap-4">
         <IdentifyMini />
         <GenerateMini />
         <DefendMini />
         <ImproveMini />
       </div>
     </section>
+  );
+}
+
+// §12.17.2: the connective element between pillar cards - a short
+// horizontal rule with a chevron glyph, inline-size icon (the locked
+// icons.ts token), leg-neutral muted color. Pure information
+// architecture: it says "the output of this card feeds the next".
+function PillarConnector() {
+  return (
+    <div
+      aria-hidden
+      className="flex items-center justify-center min-w-[24px] self-center"
+    >
+      <span className="h-px w-4 bg-[var(--border-strong)]" />
+      <ChevronRight
+        size="inline"
+        className="text-[var(--text-muted)]"
+      />
+      <span className="h-px w-4 bg-[var(--border-strong)]" />
+    </div>
   );
 }
 

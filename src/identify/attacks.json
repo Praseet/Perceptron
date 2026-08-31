@@ -6,7 +6,8 @@
     "status": "partial",
     "feasibility": 5,
     "fraud_type": "ai_impersonation",
-    "generator_profile_id": "voice_clone_scam"
+    "generator_profile_id": "voice_clone_scam",
+    "description": "An attacker uses a deepfake voice clone of a family member to urgently request a payment, exploiting emotional trust and time pressure."
   },
   {
     "id": "SE-002",
@@ -15,7 +16,8 @@
     "status": "conceptual",
     "feasibility": 3,
     "fraud_type": null,
-    "generator_profile_id": null
+    "generator_profile_id": null,
+    "description": "A video deepfake of a company executive authorizes a fraudulent wire transfer, bypassing normal financial controls."
   },
   {
     "id": "SE-003",
@@ -24,7 +26,8 @@
     "status": "partial",
     "feasibility": 5,
     "fraud_type": "ai_impersonation",
-    "generator_profile_id": null
+    "generator_profile_id": null,
+    "description": "An AI chatbot manages 100+ parallel romantic relationships at scale to build trust and extract money from victims."
   },
   {
     "id": "SE-004",
@@ -33,7 +36,8 @@
     "status": "partial",
     "feasibility": 5,
     "fraud_type": "ai_impersonation",
-    "generator_profile_id": null
+    "generator_profile_id": null,
+    "description": "An AI voice bot impersonates customer service to extract credentials and account access from target victims."
   },
   {
     "id": "SE-005",
@@ -42,7 +46,8 @@
     "status": "partial",
     "feasibility": 5,
     "fraud_type": "ai_impersonation",
-    "generator_profile_id": null
+    "generator_profile_id": null,
+    "description": "An AI system delivers personalized investment pitches tailored to each victim to convince them to hand over money."
   },
   {
     "id": "SE-006",
@@ -51,7 +56,8 @@
     "status": "implemented",
     "feasibility": 5,
     "fraud_type": null,
-    "generator_profile_id": null
+    "generator_profile_id": null,
+    "description": "AI-generated fake charity campaigns solicit donations from a large audience, disappearing once funds are collected."
   },
   {
     "id": "KYC-001",
@@ -60,7 +66,8 @@
     "status": "conceptual",
     "feasibility": 3,
     "fraud_type": null,
-    "generator_profile_id": null
+    "generator_profile_id": null,
+    "description": "A real-time deepfake video feed is used to bypass video-based KYC identity verification checks."
   },
   {
     "id": "KYC-002",
@@ -69,7 +76,8 @@
     "status": "conceptual",
     "feasibility": 5,
     "fraud_type": "synthetic_identity",
-    "generator_profile_id": "synthetic_identity_basic"
+    "generator_profile_id": "synthetic_identity_basic",
+    "description": "A synthetic identity is assembled from a GAN-generated face and an AI-written personal profile to pass KYC."
   },
   {
     "id": "KYC-003",
@@ -78,7 +86,8 @@
     "status": "conceptual",
     "feasibility": 3,
     "fraud_type": null,
-    "generator_profile_id": null
+    "generator_profile_id": null,
+    "description": "AI-generated fake IDs and passports are produced to bypass document-based identity verification."
   },
   {
     "id": "KYC-004",
@@ -87,7 +96,8 @@
     "status": "conceptual",
     "feasibility": 4,
     "fraud_type": "bustout_identity",
-    "generator_profile_id": null
+    "generator_profile_id": null,
+    "description": "A botnet automates the creation and aging of accounts to build a clean history before exploitation."
   },
   {
     "id": "KYC-005",
@@ -96,7 +106,8 @@
     "status": "future",
     "feasibility": 2,
     "fraud_type": null,
-    "generator_profile_id": null
+    "generator_profile_id": null,
+    "description": "Fingerprint or facial biometric authentication is bypassed using physical or digital spoofing techniques."
   },
   {
     "id": "PR-001",
@@ -105,7 +116,8 @@
     "status": "conceptual",
     "feasibility": 3,
     "fraud_type": "auth_bypass",
-    "generator_profile_id": null
+    "generator_profile_id": null,
+    "description": "A malicious mobile app intercepts UPI payment intents and redirects them to an attacker-controlled account."
   },
   {
     "id": "PR-002",
@@ -114,7 +126,8 @@
     "status": "conceptual",
     "feasibility": 3,
     "fraud_type": "auth_bypass",
-    "generator_profile_id": null
+    "generator_profile_id": null,
+    "description": "Fake QR codes redirect victims' payments to attacker-controlled payment endpoints."
   },
   {
     "id": "PR-003",
@@ -123,7 +136,8 @@
     "status": "conceptual",
     "feasibility": 5,
     "fraud_type": "bnpl_abuse",
-    "generator_profile_id": "bnpl_max_out"
+    "generator_profile_id": "bnpl_max_out",
+    "description": "A synthetic identity is used to open a buy-now-pay-later line and immediately max out the limit."
   },
   {
     "id": "PR-004",
@@ -132,7 +146,8 @@
     "status": "conceptual",
     "feasibility": 3,
     "fraud_type": null,
-    "generator_profile_id": null
+    "generator_profile_id": null,
+    "description": "Currency conversion and FX-rate discrepancies in cross-border payments are exploited for illicit profit."
   },
   {
     "id": "PR-005",
@@ -141,7 +156,8 @@
     "status": "conceptual",
     "feasibility": 4,
     "fraud_type": "auth_bypass",
-    "generator_profile_id": null
+    "generator_profile_id": null,
+    "description": "Multiple small recurring subscriptions are charged to victims who do not notice or actively cancel them."
   },
   {
     "id": "AI-001",
@@ -150,7 +166,8 @@
     "status": "novel",
     "feasibility": 4,
     "fraud_type": "ai_impersonation",
-    "generator_profile_id": null
+    "generator_profile_id": null,
+    "description": "A prompt injection manipulates an AI chatbot into revealing credentials or sensitive payment information."
   },
   {
     "id": "AI-002",
@@ -159,7 +176,8 @@
     "status": "conceptual",
     "feasibility": 4,
     "fraud_type": null,
-    "generator_profile_id": null
+    "generator_profile_id": null,
+    "description": "An attacker probes the fraud-detection API with crafted inputs to reverse-engineer and steal the model."
   },
   {
     "id": "AI-003",
@@ -168,7 +186,8 @@
     "status": "conceptual",
     "feasibility": 4,
     "fraud_type": "card_testing",
-    "generator_profile_id": null
+    "generator_profile_id": null,
+    "description": "ML-crafted transaction patterns are generated to evade the detection model's learned decision boundaries."
   },
   {
     "id": "AI-004",
@@ -177,7 +196,8 @@
     "status": "novel",
     "feasibility": 5,
     "fraud_type": "ai_impersonation",
-    "generator_profile_id": "llm_jacking"
+    "generator_profile_id": "llm_jacking",
+    "description": "Attackers hijack LLM-integrated payment flows (e.g. Siri, Alexa, banking chat bots) to issue fraudulent payments."
   },
   {
     "id": "AI-005",
@@ -186,7 +206,8 @@
     "status": "novel",
     "feasibility": 4,
     "fraud_type": null,
-    "generator_profile_id": null
+    "generator_profile_id": null,
+    "description": "An autonomous AI agent independently plans and executes multi-step fraud campaigns without human intervention."
   },
   {
     "id": "BM-001",
@@ -195,7 +216,8 @@
     "status": "implemented",
     "feasibility": 5,
     "fraud_type": null,
-    "generator_profile_id": null
+    "generator_profile_id": null,
+    "description": "The attacker engineers artificial urgency - countdown timers, limited-time offers, emergency pleas - to pressure victims into authorizing transactions before they can verify legitimacy."
   },
   {
     "id": "BM-002",
@@ -204,7 +226,8 @@
     "status": "conceptual",
     "feasibility": 3,
     "fraud_type": null,
-    "generator_profile_id": null
+    "generator_profile_id": null,
+    "description": "The attacker calibrates trust signals such as fake reviews, verified badges, and social proof so victims perceive the interaction as legitimate."
   },
   {
     "id": "BM-003",
@@ -213,7 +236,8 @@
     "status": "conceptual",
     "feasibility": 3,
     "fraud_type": null,
-    "generator_profile_id": null
+    "generator_profile_id": null,
+    "description": "Transactions are timed to coincide with victim behavioral rhythms - late-night hours, paydays, or moments of low vigilance - to maximize fraud success."
   },
   {
     "id": "BM-004",
@@ -222,6 +246,7 @@
     "status": "conceptual",
     "feasibility": 3,
     "fraud_type": null,
-    "generator_profile_id": null
+    "generator_profile_id": null,
+    "description": "Fraud is orchestrated across multiple concurrent channels (SMS, email, voice, push) so the victim cannot reconcile a single coherent narrative."
   }
 ]

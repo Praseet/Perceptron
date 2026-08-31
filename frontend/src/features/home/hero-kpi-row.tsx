@@ -69,12 +69,17 @@ export function HeroKpiRow() {
   }
 
   const { n_transactions, fraud_rate, pr_auc_test } = status.data;
+  // Phase 12 real-numbers rule: prefer the FULL dataset count when the
+  // backend exposes it (n_transactions_total, ~1.06M). n_transactions
+  // is the test-split count (~213k) - showing it as "Transactions" on
+  // the hero understates the dataset 5x.
+  const nTx = status.data.n_transactions_total ?? n_transactions;
 
   return (
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-3" aria-label="Key performance indicators">
       <KpiTile
         label="Transactions"
-        value={n_transactions}
+        value={nTx}
         direction="up-is-good"
         format={(n) => n.toLocaleString("en-US")}
       />

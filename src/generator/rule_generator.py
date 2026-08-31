@@ -548,21 +548,43 @@ for _ in range(_bust_n):
     next_uid += 1
 
 # ---- 5. AI-Assisted Impersonation (LLM-Prompted Generation) ----
+# ---- LIGHTWEIGHT LLM GUARD (speed fix; full script split deferred). ----
+# When either LLM target is >0 we probe the endpoint ONCE here, before importing
+# llm_generator (which also raises RuntimeError at import when no provider is
+# configured) or issuing any call. Endpoint unreachable: LLM sections are skipped
+# entirely (pure rule-based output; rule-based fallback tops up ai_impersonation organically).
+_llm_imp_target= int(os.getenv("LLM_IMPERSONATION_TARGET", "0"))
+_llm_benign_target= int(os.getenv("BENIGN_TARGET", "0"))
+_llm_probe_on = (_llm_imp_target >  0) or (_llm_benign_target >  0)
+try:
+    from llm_guard import probe_llm as _probe_llm
+except ImportError:
+    from src.generator.llm_guard import probe_llm as _probe_llm
+if _llm_probe_on:
+    llm_available = _probe_llm()
+else:
+    llm_available = False
+if not llm_available:
+    if _llm_imp_target >0:
+        print("[rule_generator] LLM endpoint unavailable -- skipping LLM ai_impersonation generation (rule-based fallback tops up. Start LM Studio or set LLM_IMPERSONATION_TARGET=0.", flush=True)
+    if _llm_benign_target >0:
+        print(f"[rule_generator] LLM endpoint unavailable -- skipping {_llm_benign_target} benign-transcript generations.", flush=True)
 import sys
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-try:
-    from src.generator.llm_generator import (
-        generate_llm_case_batch, materialize_llm_transaction, PRETEXTS,
-        generate_benign_case_batch, BENIGN_PRETEXTS,
-    )
-except (ModuleNotFoundError, ImportError):
-    from llm_generator import (
-        generate_llm_case_batch, materialize_llm_transaction, PRETEXTS,
-        generate_benign_case_batch, BENIGN_PRETEXTS,
-    )
+if llm_available:
+    try:
+        from src.generator.llm_generator import (
+            generate_llm_case_batch, materialize_llm_transaction, PRETEXTS,
+            generate_benign_case_batch, BENIGN_PRETEXTS,
+        )
+    except (ModuleNotFoundError, ImportError):
+        from llm_generator import (
+            generate_llm_case_batch, materialize_llm_transaction, PRETEXTS,
+            generate_benign_case_batch, BENIGN_PRETEXTS,
+        )
 
 # Prototype budget: enough to validate the path to the next tier, small enough
 # to regenerate quickly on the local Qwen model. Raised here so the temporal
@@ -573,7 +595,7 @@ except (ModuleNotFoundError, ImportError):
 # this alone never worked. 160 is a modest safety-margin bump on top of the actual
 # fix, sized for the thinnest slice (val is only ~10% of the time window) now that
 # cases land where they naturally should.
-LLM_IMPERSONATION_TARGET = 0  # LLM DISABLED - pure rule-based generation
+LLM_IMPERSONATION_TARGET = _llm_imp_target if llm_available else 0  # 0 = off (pure rule-based); >0 enables LLM ai_impersonation transcripts (probe-gated above.)
 LLM_BATCH_SIZE = int(os.getenv("LLM_BATCH_SIZE", "5"))
 # CHANGED (1024 -> 3072 for local): with LLM_BATCH_SIZE=1, the full token budget
 # goes to a SINGLE transcript now, not two -- 1024 was a regression likely causing
@@ -709,11 +731,11 @@ if n_needed > 0:
 # which is all src/models/transcript_classifier.py needs.
 # Keep the negative set balanced enough for later-tier training without turning
 # regeneration into a long local-model run.
-BENIGN_TARGET = 0  # LLM DISABLED - pure rule-based generation
-benign_pending = [(rng.choice(BENIGN_PRETEXTS), new_case_id("benign_transcript")) for _ in range(BENIGN_TARGET)]
-for batch in _batched(benign_pending, LLM_BATCH_SIZE):
-    generate_benign_case_batch(batch)
-
+BENIGN_TARGET = _llm_benign_target  # LLM probe-gated; loop below guarded by llm_available.
+if llm_available:
+    benign_pending = [(rng.choice(BENIGN_PRETEXTS), new_case_id("benign_transcript")) for _ in range(BENIGN_TARGET)]
+    for batch in _batched(benign_pending, LLM_BATCH_SIZE):
+        generate_benign_case_batch(batch)
 def inject_synthetic_identity(next_uid):
     """KYC-002: GAN-generated synthetic identity fraud.
     
@@ -791,8 +813,6 @@ def inject_bnpl_abuse(next_uid):
     else:
         device = f"dev_bnpl_{next_uid}"
     # ANTI-LEAKAGE FIX: Realistic account age range overlapping normal IQR
-    account_start_age = int(rng.integers(30, 2800))
-    current_day = start_day
     account_start_age = int(rng.integers(30, 2800))
     current_day = start_day
     n_tx = 0

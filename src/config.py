@@ -55,6 +55,11 @@ ISO_FOREST_CONFIG_JSON = MODELS_ARTIFACTS / "isolation_forest_config.json"
 ISO_FOREST_THRESHOLDS_CSV = MODELS_ARTIFACTS / "isolation_forest_thresholds.csv"
 FEEDBACK_QUEUE_CSV = DATA_PROCESSED / "anomaly_feedback_queue.csv"
 
+# Frozen metrics manifest (P0.8): one JSON artifact with the headline
+# validation/test metrics of the ACTIVE submission model. The API reads the
+# stored values instead of recomputing million-row metrics on every request.
+METRICS_MANIFEST_JSON = MODELS_ARTIFACTS / "metrics_manifest.json"
+
 # SHAP outputs
 # =============================================================================
 # FEATURE COLUMN DEFINITIONS (single source of truth)
@@ -150,11 +155,16 @@ FEEDBACK_STEER_STRENGTH = 0.3
 # =============================================================================
 # ISOLATION FOREST CONFIGURATION (Tier 2)
 # =============================================================================
+IF_FEATURE_COLS = list(FEATURE_COLS)  # explicit Tier 2 feature contract (P0.1): no IDs, no labels
+
 IF_PARAM_GRID = {
-    "n_estimators": [200, 400, 600],
-    "max_samples": [128, 256, 512],
+    # P0.21: focused search around the data geometry (18 configs, not 27+)
+    "n_estimators": [200, 400],
+    "max_samples": [256, 512, 1024],
     "max_features": [0.5, 0.75, 1.0],
 }
+IF_BLEND_WEIGHTS = [0.9, 0.8, 0.7, 0.6]  # P0.20: XGB-weight candidates for the calibrated blend
+IF_NOVELTY_QUANTILES = 101  # P0.23: resolution of the stored TRAIN_NORMAL quantile grid
 IF_FIXED_PARAMS = {
     "random_state": 42,
     "n_jobs": -1,

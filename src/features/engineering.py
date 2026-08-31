@@ -157,7 +157,10 @@ def add_features(df, fit_mask=None):
     mean_amt = np.mean(amount[fit_mask_arr])
     std_amt = max(np.std(amount[fit_mask_arr]), 1e-9)
     # Avoid division by zero: replace sum2_30d=0 with small epsilon
-    denom = np.sqrt(np.where(sum2_30d > 0, sum2_30d / np.maximum(count_30d - 1, 1), 1.0))
+    # P0.6 — `sum2_30d` is already the *sample variance* (SS / (n-1)); the
+    # previous code divided by (n-1) AGAIN here, shrinking every 30-day
+    # z-score and distorting this core behavioral feature for both XGB and IF.
+    denom = np.sqrt(np.where(sum2_30d > 0, sum2_30d, 1.0))
     df["amount_zscore_30d"] = np.where(count_30d > 0,
                                        (amount - sum_30d) / denom,
                                        (amount - mean_amt) / std_amt)

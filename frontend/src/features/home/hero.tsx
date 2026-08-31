@@ -10,11 +10,21 @@
 // inset panel (console-like instrument surface), 1px border, small
 // 'static - v1' label. Diagram dominates; copy supports."
 
+import { lazy, Suspense } from "react";
 import { useNavigate } from "react-router-dom";
-import { LoopDiagram } from "../../design-system/patterns/loop-diagram";
 import { Button } from "../../design-system/primitives";
 import { Play, ArrowRight } from "../../design-system/icons";
 import { ROUTES } from "../../lib/constants";
+
+// Phase 12 (§12.6 + §12.9 step 2): LoopFlowScene is its own React.lazy
+// boundary so the ambient animation's code never blocks the hero's copy
+// and CTA from rendering. The fallback is the console panel shell at the
+// same aspect ratio - not a spinner (this codebase has none, per H.10).
+const LoopFlowScene = lazy(() =>
+  import("../../design-system/patterns/loop-flow-scene").then((m) => ({
+    default: m.LoopFlowScene,
+  })),
+);
 
 export function Hero() {
   const navigate = useNavigate();
@@ -30,7 +40,11 @@ export function Hero() {
         <p className="text-caption text-[var(--text-muted)] font-mono uppercase tracking-[0.12em]">
           Adversarial Fraud Lab
         </p>
-        <h1 className="font-display text-[2.5rem] sm:text-[3.25rem] leading-[1.05] font-semibold tracking-[-0.02em] text-[var(--text-primary)]">
+        {/* §12.8.6.2: fluid type scale - clamp, not breakpoint jumps. */}
+        <h1
+          className="font-display leading-[1.05] font-semibold tracking-[-0.02em] text-[var(--text-primary)]"
+          style={{ fontSize: "clamp(1.75rem, 4vw + 0.5rem, 3.25rem)" }}
+        >
           The AI that learns fraud by{" "}
           <span className="text-[var(--accent-cyan)]">becoming</span> a
           fraudster.
@@ -79,13 +93,25 @@ export function Hero() {
               closed loop
             </span>
             <span className="text-[0.625rem] font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
-              static - v1
+              ambient preview
             </span>
           </div>
-          <LoopDiagram mode="static" />
+          <Suspense
+            fallback={
+              <div
+                style={{
+                  aspectRatio: "1 / 1",
+                  background: "var(--bg-panel)",
+                  border: "1px solid var(--border-subtle)",
+                }}
+              />
+            }
+          >
+            <LoopFlowScene mode="ambient" />
+          </Suspense>
         </div>
         <p className="mt-2 text-[0.625rem] font-mono text-[var(--text-muted)] text-center">
-          This is what the system looks like idle. Run a real cycle to watch it move.
+          This is the loop, running continuously in preview. Press Run for a live cycle.
         </p>
       </div>
     </section>

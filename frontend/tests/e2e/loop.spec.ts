@@ -34,17 +34,21 @@ test("phase 9 - /loop renders and a Run produces a sequence of events", async ({
   // Click Run. The demo's runLoop compresses to ~4s for 3 cycles.
   await page.getByRole("button", { name: /Run the closed loop/i }).click();
 
-  // First event appears in the timeline.
+  // First event appears in the timeline. NOTE: the timeout must go in
+  // toBeVisible()'s options - the second expect() argument is a custom
+  // message, not options (a latent bug that silently applied the 10s
+  // default through Phases 9-11).
   await expect(
     page.getByText(/Run started \(baseline recall/),
-    { timeout: 5000 },
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 10000 });
 
-  // Wait for run_complete to land.
+  // Wait for run_complete to land. Phase 11 live cutover: a real
+  // 3-cycle run takes ~15s against the live backend (vs ~4s in demo),
+  // and up to ~48s when the box is loaded - 30s covers the typical
+  // live case without hanging.
   await expect(
     page.getByText(/Run complete \(final PR-AUC/),
-    { timeout: 10000 },
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 30000 });
 
   // Delta tiles are populated.
   await expect(page.getByText("Recall").first()).toBeVisible();
@@ -76,14 +80,12 @@ test("phase 9 - Run button is disabled during a run and re-enables after", async
   await page.getByRole("button", { name: /Run the closed loop/i }).click();
   await expect(
     page.getByText(/Run started \(baseline recall/),
-    { timeout: 5000 },
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 5000 });
   const runBtn = page.getByRole("button", { name: /Run the closed loop/i });
   await expect(runBtn).toBeDisabled();
   await expect(
     page.getByText(/Run complete \(final PR-AUC/),
-    { timeout: 10000 },
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 30000 });
   await expect(runBtn).toBeEnabled();
 });
 
@@ -93,8 +95,7 @@ test("phase 9 - unmounting /loop tears down the stream", async ({ page }) => {
   await page.getByRole("button", { name: /Run the closed loop/i }).click();
   await expect(
     page.getByText(/Run started \(baseline recall/),
-    { timeout: 5000 },
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 5000 });
   await page.getByRole("link", { name: "Identify" }).click();
   await page.waitForURL(/\/identify/);
   await expect(page.getByRole("heading", { name: "Loop", level: 1 })).toHaveCount(0);
@@ -114,8 +115,7 @@ test("phase 9 - RunHistoryTable gains a row after a local run", async ({ page })
   await page.getByRole("button", { name: /Run the closed loop/i }).click();
   await expect(
     page.getByText(/Run complete \(final PR-AUC/),
-    { timeout: 10000 },
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 30000 });
 
   // The first row should be the just-completed run.
   const firstRowText = await page.locator("table").last().locator("tbody tr").first().textContent();
@@ -146,8 +146,7 @@ test("phase 9 - Connection lost row absent in the happy path", async ({ page }) 
   await page.getByRole("button", { name: /Run the closed loop/i }).click();
   await expect(
     page.getByText(/Run complete \(final PR-AUC/),
-    { timeout: 10000 },
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 30000 });
   await expect(
     page.getByText(/Connection lost - showing results through the last received cycle/),
   ).toHaveCount(0);

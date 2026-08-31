@@ -229,7 +229,9 @@ class RollingFeatureExtractor(BaseEstimator, TransformerMixin):
         X["is_high_amount_burst"] = (burst_10m >= 3).astype(int)
         
         # amount_zscore_30d
-        denom = np.sqrt(np.where(sum2_30d > 0, sum2_30d / np.maximum(count_30d - 1, 1), 1.0))
+        # P0.6 — `sum2_30d` is already the sample variance (SS / (n-1)); the
+        # previous code divided by (n-1) again, distorting the z-score.
+        denom = np.sqrt(np.where(sum2_30d > 0, sum2_30d, 1.0))
         X["amount_zscore_30d"] = np.where(
             count_30d > 0,
             (amount - sum_30d) / denom,
