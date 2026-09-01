@@ -1,4 +1,3 @@
-export { LoopDiagram } from "./loop-diagram";
 export { KpiTile } from "./kpi-tile";
 export { CountUp } from "./count-up";
 export { RiskBadge } from "./risk-badge";
