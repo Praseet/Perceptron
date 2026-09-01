@@ -49,5 +49,7 @@ else:
 
 run("engineering",   [sys.executable, "-W", "ignore", "src/features/engineering.py"])
 run("anti_leakage",  [sys.executable, "-W", "ignore", "src/generator/anti_leakage.py"])
+run("train",         [sys.executable, "-W", "ignore", "src/models/train.py"])
+run("evaluate",      [sys.executable, "-W", "ignore", "src/models/evaluate.py"])
 
 print(f"PIPELINE OK in {time.time()-start:.1f}s", flush=True)

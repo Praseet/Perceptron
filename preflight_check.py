@@ -383,7 +383,7 @@ def main() -> int:
         log(f"Artifacts     : {'OK' if not missing_artifacts else 'MISSING: ' + ', '.join(missing_artifacts)}")
         if missing_artifacts:
             log("Phase 4 requires running the ML pipeline to generate model artifacts.")
-            log("Required steps: src/generator/llm_generator.py + run_pipeline.py")
+            log("Required steps: rule_generator -> engineering -> anti_leakage -> train -> evaluate")
             if want_install:
                 if not auto_yes:
                     ans = input("[Phase 4] Run training/pipeline now to generate artifacts? [Y/n] ").strip().lower()

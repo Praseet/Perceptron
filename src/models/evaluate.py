@@ -81,11 +81,11 @@ def main() -> None:
     if iso_path.exists():
         out.step("Loading Tier 2 (Isolation Forest)...")
         iso_forest = joblib.load(iso_path)
-        # Use raw numeric columns (26 features) matching anomaly.py training
-        X_val_numeric = val_df.select_dtypes("number").to_numpy()
-        X_test_numeric = test_df.select_dtypes("number").to_numpy()
-        iso_test_pr = _pr_auc(y_test, _iso_proba(-iso_forest.decision_function(X_test_numeric)))
-        iso_val_pr = _pr_auc(y_val, _iso_proba(-iso_forest.decision_function(X_val_numeric)))
+        from config import IF_FEATURE_COLS
+        X_val_if = val_df.reindex(columns=IF_FEATURE_COLS, fill_value=0).astype(float).replace([np.inf, -np.inf], np.nan).fillna(0.0).to_numpy()
+        X_test_if = test_df.reindex(columns=IF_FEATURE_COLS, fill_value=0).astype(float).replace([np.inf, -np.inf], np.nan).fillna(0.0).to_numpy()
+        iso_test_pr = _pr_auc(y_test, _iso_proba(-iso_forest.decision_function(X_test_if)))
+        iso_val_pr = _pr_auc(y_val, _iso_proba(-iso_forest.decision_function(X_val_if)))
         out.kv("Tier 2 val PR-AUC",  f"{iso_val_pr:.4f}")
         out.kv("Tier 2 test PR-AUC", f"{iso_test_pr:.4f}")
     else:
