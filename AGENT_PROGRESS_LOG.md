@@ -1,5 +1,8 @@
 # Agent Progress Log
 
+2026-09-01T09:30:00Z  P1  PASS  preflight_check.py rewritten with 5-phase structure, --yes flag, y/n prompts, Phase 4 (artifacts + pipeline), Phase 5 (.env generation)
+2026-09-01T09:35:00Z  P2  PASS  start.cmd updated to use --install --yes; stop.cmd created
+
 ## T0.5 — Untracked File Inventory (repo root, verified against live GitHub state)
 
 ### Likely-real, undocumented content (worth asking user whether to commit):

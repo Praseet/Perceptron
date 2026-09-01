@@ -1,9 +1,9 @@
 @echo off
 REM ===============================================================
 REM Adversarial Fraud Lab - one-command launcher (Windows)
-REM Runs preflight_check.py, offers to auto-install missing Python
-REM / frontend deps (with '*' progress), and only starts the stack
-REM when ENVIRONMENT READY.
+REM Runs preflight_check.py --install --yes (auto-installs missing
+REM Python/frontend deps with '*' progress), and only starts the
+REM stack when ENVIRONMENT READY.
 REM Stop with: stop.cmd
 REM ===============================================================
 setlocal enabledelayedexpansion
@@ -20,7 +20,7 @@ echo   Frontend: http://127.0.0.1:5173  (Vite/React)
 echo.
 
 if not exist "%ROOT%.venv\Scripts\python.exe" (
-    echo [preflight] .venv not found; will offer to create + install below.
+    echo [preflight] .venv not found; will auto-install below.
 )
 
 REM ---- Phase 1: preflight CHECK (no install) ----
@@ -38,14 +38,11 @@ goto :launch
 :need_fix
 echo.
 echo [preflight] environment NOT ready. See report above.
-set /p "INSTALL=Install missing dependencies now? [Y/N] "
-if /I not "%INSTALL%"=="Y" goto :manual
-
-echo [preflight] installing (watch for '*' progress)...
+echo [preflight] auto-installing (watch for '*' progress)...
 if exist "%ROOT%.venv\Scripts\python.exe" (
-    "%ROOT%.venv\Scripts\python.exe" "%ROOT%preflight_check.py" --install
+    "%ROOT%.venv\Scripts\python.exe" "%ROOT%preflight_check.py" --install --yes
 ) else (
-    py -3 "%ROOT%preflight_check.py" --install
+    py -3 "%ROOT%preflight_check.py" --install --yes
 )
 if errorlevel 1 (
     echo [preflight] auto-install FAILED or partial.
