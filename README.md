@@ -13,11 +13,11 @@ The screenshot above is the live frontend (Vite + React 19 + the trained XGBoost
 - **Defend** - Tiered XGBoost Tier 1 + Isolation Forest Tier 2 ensemble
 - **Adapt** - Closed-loop feedback that strengthens from misses
 
-## Quick Start - Live Demo
+## Quick Start
 
-Two processes - backend (FastAPI, port 8000) and frontend (Vite, port 5173). Both must be running for the live demo.
+Two processes - backend (FastAPI, port 8000) and frontend (Vite, port 5173). Both must be running for the live system.
 
-### 1. Backend
+### One-Command Launcher (Windows)
 
 ```bash
 # From the repo root, with the project\'s venv active (uvicorn + fastapi installed).
@@ -49,9 +49,7 @@ Open http://127.0.0.1:5173/ and walk all 5 pages:
 - `/defend`   - Live XGBoost prediction + SHAP waterfall on real model output
 - `/loop`     - Click "Run the closed loop" to drive the SSE stream
 
-### 3. Demo Mode (fallback)
-
-If the backend is down, set `VITE_DEMO_MODE=true` in `frontend/.env` and restart the dev server. The frontend falls back to canned data so the demo never breaks.
+> **Footnote - Demo Mode:** A demo/fallback mode is available via `VITE_DEMO_MODE=true` in `frontend/.env` (see `frontend/.env.example`). It exists so the frontend remains navigable when no backend is running. The primary mode of operation is the live system described above.
 
 
 ## Results
@@ -101,8 +99,8 @@ fraud_model/
 +- frontend/
 |  +- src/                         # React 19 + Vite SPA
 |  +- tests/e2e/                   # Playwright suite (a11y, smoke, perf, cross-browser)
-|  +- .env                         # gitignored; VITE_DEMO_MODE=false for live demo
-|  +- .env.example                 # committed; VITE_DEMO_MODE=true
+|  +- .env                         # gitignored; API base URL for live
+|  +- .env.example                 # committed
 +- docs/
    +- assets/                      # Submission screenshots (live data)
    +- ATTACK_TAXONOMY.md
