@@ -242,6 +242,16 @@ _ATTACKS = json.loads(_ATTACKS_PATH.read_text(encoding="utf-8"))
 _ATTACK_BY_ID = {a["id"]: a for a in _ATTACKS}
 
 
+def _generation_log_df():
+    if not Path(GENERATION_LOG_CSV).exists():
+        return None
+    try:
+        return pd.read_csv(GENERATION_LOG_CSV)
+    except Exception as exc:
+        print("[backend] failed to load generation log: " + str(exc), file=sys.stderr)
+        return None
+
+
 def _system_status():
     # P0.31 — the status endpoint works lazily; the big dataframes are only
     # loaded here (and memoized) instead of in the startup path.
@@ -250,6 +260,7 @@ def _system_status():
         return {"online": False, "n_users": 0, "n_transactions": 0,
                 "n_transactions_total": 0, "fraud_rate": 0.0,
                 "pr_auc_test": 0.0, "last_retrain_at": "",
+                "n_attacks_generated": 0,
                 "backend_status": "unavailable"}
     # Unique-user count must come from the actual user_id column, not
     # the row count (which is what this used to report). The frontend
@@ -267,6 +278,8 @@ def _system_status():
     if val_df is not None:
         n_tx_total += int(len(val_df))
     fraud_rate = float(test_df["is_fraud"].mean()) if "is_fraud" in test_df.columns else 0.0
+    gen_log = _generation_log_df()
+    n_attacks_generated = int(len(gen_log)) if gen_log is not None else 0
 
     # P0.8/P0.7 — headline PR-AUC comes from the frozen metrics manifest (which
     # is sha256-checked against the active model artifact) when available;
@@ -293,9 +306,9 @@ def _system_status():
                 pr_auc = 0.0
                 pr_auc_source = "error"
     return {"online": _ready(), "n_users": n_users, "n_transactions": n_tx,
-            "n_transactions_total": n_tx_total,
-            "fraud_rate": fraud_rate, "pr_auc_test": pr_auc,
-            "last_retrain_at": "2026-08-29T00:00:00Z",
+            "n_transactions_total": n_tx_total, "fraud_rate": fraud_rate,
+            "pr_auc_test": pr_auc, "last_retrain_at": "2026-08-29T00:00:00Z",
+            "n_attacks_generated": n_attacks_generated,
             "backend_status": pr_auc_source}
 
 def _eval_per_class():

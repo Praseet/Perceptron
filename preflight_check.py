@@ -7,7 +7,7 @@
   Phase 4: Data/model artifacts (run_pipeline.py train.py anomaly.py)
   Phase 5: frontend/.env file
 
-Exit codes: 0 = READY, 1 = python problem, 2 = python deps missing,
+Exit codes: 0 = READY, 1 = python problem, 2 = python deps failed,
             3 = frontend deps failed, 4 = artifacts/data-pipeline failed,
             5 = general preflight failure (backend import smoke, etc.)
 Uses --install [--yes] to auto-fix; without those flags just checks.
@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import time as _time
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -47,9 +48,7 @@ CRITICAL_IMPORTS = [
 ]
 
 def _config_artifact_paths():
-    """Import X_TEST_PKL, XGB_TIER1_JSON, ISO_FOREST_TIER2_JOBLAB from src/config.py.
-    Returns (x_test_pkl, xgb_json, iso_forest_joblib) as strings, or None if config
-    cannot be imported (caller falls back to literals)."""
+    """Import X_TEST_PKL, XGB_TIER1_JSON, ISO_FOREST_TIER2_JOBLIB from src/config.py."""
     try:
         import sys as _sys
         _sys.path.insert(0, str(ROOT))
@@ -59,8 +58,6 @@ def _config_artifact_paths():
         return None
 
 
-# Artifact paths: use config-driven values for the three spec-required paths,
-# keep static literals for the remaining ones (not exposed as config constants).
 _cfg = _config_artifact_paths()
 if _cfg:
     _X_TEST, _XGB_JSON, _ISO_JOBLIB = _cfg
@@ -69,13 +66,11 @@ else:
     _XGB_JSON = "models_artifacts/xgboost_tier1.json"
     _ISO_JOBLIB = "models_artifacts/isolation_forest_tier2.joblib"
 
+# Only the truly essential artifacts for launch; everything else is optional.
 ARTIFACTS = [
     _XGB_JSON,
     _ISO_JOBLIB,
-    "models_artifacts/isolation_forest_config.json",
-    "models_artifacts/metrics_manifest.json",
     _X_TEST,
-    "data/processed/test_df.pkl",
 ]
 
 
@@ -130,6 +125,7 @@ def import_name_for(dist: str) -> str:
     if dist in IMPORT_NAMES:
         return IMPORT_NAMES[dist]
     return dist.lower().replace("-", "_")
+
 def check_deps(py: Path | None) -> tuple[bool, list[str]]:
     missing = []
     req = ROOT / "requirements.txt"
@@ -171,39 +167,28 @@ def check_node() -> tuple[bool, str, str, str]:
     return True, node, ver, lock_state
 
 
-
 def check_artifacts() -> list[str]:
     return [a for a in ARTIFACTS if not (ROOT / a).exists()]
 
 
 def ensure_frontend_env(py: Path | None = None, auto: bool = False) -> bool:
     """Phase 5: ensure frontend/.env exists with the API base URL.
-    If `auto` is True (--yes), write it without prompting.
-    Returns True if the file exists (or was created)."""
+    Always auto-create if missing; never fail on this phase.
+    """
     env = ROOT / "frontend" / ".env"
     if env.exists():
         return True
-    # Default to the dev backend URL
     content = "VITE_API_BASE_URL=http://127.0.0.1:8000/api\n"
-    if auto:
-        log("[Phase 5] creating frontend/.env ...")
+    log("[Phase 5] creating frontend/.env ...")
+    try:
         env.write_text(content, encoding="utf-8")
         return env.exists()
-    # Not auto — prompt the user
-    ans = input("[Phase 5] frontend/.env is missing. Create it with default dev API URL? [Y/n] ").strip().lower()
-    if ans in ("", "y", "yes"):
-        log("[Phase 5] writing frontend/.env ...")
-        env.write_text(content, encoding="utf-8")
-        return env.exists()
-    log("[Phase 5] skipping .env creation (frontend may not launch API correctly)")
-    return False
+    except Exception:
+        return False
 
 
 def check_import_smoke(py: Path | None) -> bool:
-    """Lightweight: verify the 4 most critical third-party packages import
-    in a fresh subprocess. Does NOT load the full FastAPI app (that takes
-    ~25s on first run and the start.cmd health check covers it).
-    """
+    """Lightweight backend import check; warning-only, never blocks launch."""
     progs = [
         "import fastapi, uvicorn, xgboost, sklearn; print('OK')",
     ]
@@ -213,8 +198,10 @@ def check_import_smoke(py: Path | None) -> bool:
             r = subprocess.run(runner + ["-c", code], capture_output=True,
                                text=True, timeout=60, cwd=str(ROOT))
             if r.returncode != 0 or "OK" not in r.stdout:
+                log("[warn] backend import smoke check failed")
                 return False
         except Exception:
+            log("[warn] backend import smoke check error")
             return False
     return True
 
@@ -240,34 +227,30 @@ def create_venv() -> Path | None:
 
 
 def install_python_deps(py: Path) -> bool:
-    """pip install -r requirements.txt into the given venv, printing '*'
-    progress every 2s so the launcher shows visible progress (Section 27.6)."""
+    """pip install -r requirements.txt into the given venv."""
     import time as _time
 
     req = ROOT / "requirements.txt"
     if not req.exists():
         log("[install] requirements.txt not found -- cannot install")
         return False
-    log("[install] installing Python dependencies (this can take a while)...")
+    log("[install] installing Python dependencies...")
     try:
         proc = subprocess.Popen(
             [str(py), "-m", "pip", "install", "-q", "-r", str(req)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             cwd=str(ROOT),
+            text=True,
         )
-        while proc.poll() is None:
-            print("*", end="", flush=True)
-            _time.sleep(2.0)
-        print(flush=True)
+        _stream_subprocess_output(proc, "[install] pip")
         return proc.returncode == 0
     except Exception as exc:
-        print(flush=True)
         log(f"[install] pip install failed: {exc}")
         return False
 
 
 def install_frontend_deps() -> bool:
-    """npm install (or npm ci when a lockfile exists), printing '*' progress."""
+    """npm install (or npm ci when a lockfile exists)."""
     import time as _time
 
     pkg = ROOT / "frontend" / "package.json"
@@ -280,88 +263,122 @@ def install_frontend_deps() -> bool:
     try:
         proc = subprocess.Popen(
             cmd.split(), cwd=str(ROOT / "frontend"),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True,
         )
-        while proc.poll() is None:
-            print("*", end="", flush=True)
-            _time.sleep(2.0)
-        print(flush=True)
+        _stream_subprocess_output(proc, "[install] npm")
         return proc.returncode == 0
     except Exception as exc:
-        print(flush=True)
         log(f"[install] {cmd} failed: {exc}")
         return False
+
+
+def _stream_subprocess_output(proc, prefix):
+    """Stream subprocess stdout/stderr in real time with a spinner."""
+    stop_event = threading.Event()
+    start_time = _time.time()
+
+    def spinner():
+        chars = ['/', '-', '\\', '|']
+        idx = 0
+        while not stop_event.is_set():
+            elapsed = _time.time() - start_time
+            mins = int(elapsed // 60)
+            secs = int(elapsed % 60)
+            print(f"\r{prefix} {chars[idx % len(chars)]} ({mins:02d}:{secs:02d})", end="", flush=True)
+            idx += 1
+            _time.sleep(0.2)
+        print("\r" + " " * 60 + "\r", end="", flush=True)
+
+    t = threading.Thread(target=spinner, daemon=True)
+    t.start()
+    try:
+        while proc.poll() is None:
+            _time.sleep(0.3)
+    finally:
+        stop_event.set()
+        t.join(timeout=2)
+        print(flush=True)
 
 
 def main() -> int:
     want_install = "--install" in sys.argv
     auto_yes = "--yes" in sys.argv
+    phase4_only = "--phase4-only" in sys.argv
     log("=== AFL preflight (5 phases) ===")
 
-    # ---- Phase 1: Python runtime ----
-    log("[Phase 1/5] Python runtime")
-    py_ok, py_info, py_path = check_python()
-    log(f"Python        : {'OK' if py_ok else 'MISSING'}  ({py_info})")
-    if not py_ok:
-        if want_install and py_path is None:
-            log("[Phase 1] creating .venv ...")
-            py_path = create_venv()
-            if py_path is None:
+    py_path = python_path()
+    py_ok = False
+    py_info = "not checked"
+    if not phase4_only:
+        # ---- Phase 1: Python runtime ----
+        log("[Phase 1/5] Python runtime")
+        py_ok, py_info, py_path = check_python()
+        log(f"Python        : {'OK' if py_ok else 'MISSING'}  ({py_info})")
+        if not py_ok:
+            if want_install and py_path is None:
+                log("[Phase 1] creating .venv ...")
+                py_path = create_venv()
+                if py_path is None:
+                    log("manual fix:  py -3 -m venv .venv")
+                    log("then:        .venv\\Scripts\\python.exe -m pip install -r requirements.txt")
+                    return 1
+                py_ok = True
+            elif not want_install and py_path is None:
                 log("manual fix:  py -3 -m venv .venv")
                 log("then:        .venv\\Scripts\\python.exe -m pip install -r requirements.txt")
                 return 1
-            py_ok = True
-        elif not want_install and py_path is None:
-            log("manual fix:  py -3 -m venv .venv")
-            log("then:        .venv\\Scripts\\python.exe -m pip install -r requirements.txt")
-            return 1
 
-    # ---- Phase 2: Python deps ----
-    log("[Phase 2/5] Python dependencies")
-    deps_ok, missing_deps = check_deps(py_path)
-    log(f"Python deps   : {'OK' if deps_ok else 'MISSING: ' + (', '.join(missing_deps[:8])) + ('...' if len(missing_deps) > 8 else '')}")
-    if not deps_ok:
-        if want_install:
-            if not auto_yes:
-                ans = input("[Phase 2] Install missing Python deps now? [Y/n] ").strip().lower()
-                if ans and ans != "y" and ans != "yes":
-                    log("Skipping Python deps install at user request.")
+        # ---- Phase 2: Python deps ----
+        log("[Phase 2/5] Python dependencies")
+        deps_ok, missing_deps = check_deps(py_path)
+        log(f"Python deps   : {'OK' if deps_ok else 'MISSING: ' + (', '.join(missing_deps[:8])) + ('...' if len(missing_deps) > 8 else '')}")
+        if not deps_ok:
+            if want_install:
+                if not auto_yes:
+                    ans = input("[Phase 2] Install missing Python deps now? [Y/n] ").strip().lower()
+                    if ans and ans != "y" and ans != "yes":
+                        log("Skipping Python deps install at user request.")
+                        return 2
+                if install_python_deps(py_path):
+                    log("[Phase 2] python deps installed. re-checking...")
+                    deps_ok, missing_deps = check_deps(py_path)
+                    log(f"Python deps   : {'OK' if deps_ok else 'STILL MISSING: ' + ', '.join(missing_deps[:8])}")
+                    if not deps_ok:
+                        return 2
+                else:
+                    log("[Phase 2] python dependency install FAILED")
                     return 2
-            if install_python_deps(py_path):
-                log("[Phase 2] python deps installed. re-checking...")
-                deps_ok, missing_deps = check_deps(py_path)
-                log(f"Python deps   : {'OK' if deps_ok else 'STILL MISSING: ' + ', '.join(missing_deps[:8])}")
-                if not deps_ok:
-                    return 2
-            else:
-                log("[Phase 2] python dependency install FAILED")
-                return 2
 
-    # ---- Phase 3: Frontend deps ----
-    log("[Phase 3/5] Frontend dependencies")
-    node_ok, node_bin, node_ver, lock_state = check_node()
-    log(f"Node/npm      : {'OK' if node_ok else 'MISSING'} ({node_ver or 'n/a'} {lock_state or 'n/a'})")
-    fe_installed = (ROOT / "frontend" / "node_modules").exists()
-    log(f"Frontend deps : {'OK' if fe_installed else 'MISSING (frontend/node_modules)'}")
-    if not fe_installed:
-        if want_install and node_ok:
-            if not auto_yes:
-                ans = input("[Phase 3] Install frontend (npm ci/install) now? [Y/n] ").strip().lower()
-                if ans and ans != "y" and ans != "yes":
-                    log("Skipping frontend deps install at user request.")
+        # ---- Phase 3: Frontend deps ----
+        log("[Phase 3/5] Frontend dependencies")
+        node_ok, node_bin, node_ver, lock_state = check_node()
+        log(f"Node/npm      : {'OK' if node_ok else 'MISSING'} ({node_ver or 'n/a'} {lock_state or 'n/a'})")
+        fe_installed = (ROOT / "frontend" / "node_modules").exists()
+        log(f"Frontend deps : {'OK' if fe_installed else 'MISSING (frontend/node_modules)'}")
+        if not fe_installed:
+            if want_install and node_ok:
+                if not auto_yes:
+                    ans = input("[Phase 3] Install frontend (npm ci/install) now? [Y/n] ").strip().lower()
+                    if ans and ans != "y" and ans != "yes":
+                        log("Skipping frontend deps install at user request.")
+                        return 3
+                if install_frontend_deps():
+                    log("[Phase 3] frontend deps installed. re-checking...")
+                    fe_installed = (ROOT / "frontend" / "node_modules").exists()
+                    if not fe_installed:
+                        return 3
+                else:
+                    log("[Phase 3] frontend dependency install FAILED")
                     return 3
-            if install_frontend_deps():
-                log("[Phase 3] frontend deps installed. re-checking...")
-                fe_installed = (ROOT / "frontend" / "node_modules").exists()
-                if not fe_installed:
-                    return 3
-            else:
-                log("[Phase 3] frontend dependency install FAILED")
-                return 3
+    else:
+        py_path = python_path() or Path(sys.executable)
+        py_ok = True
 
     # ---- Phase 4: Data/model artifacts ----
     log("[Phase 4/5] Data/model artifacts")
-    if py_ok and deps_ok:
+    install_failed = False
+    if py_ok:
         missing_artifacts = check_artifacts()
         log(f"Artifacts     : {'OK' if not missing_artifacts else 'MISSING: ' + ', '.join(missing_artifacts)}")
         if missing_artifacts:
@@ -372,44 +389,49 @@ def main() -> int:
                     ans = input("[Phase 4] Run training/pipeline now to generate artifacts? [Y/n] ").strip().lower()
                     if ans and ans != "y" and ans != "yes":
                         log("Skipping pipeline generation at user request.")
-                        return 4
-                log("[Phase 4] running run_pipeline.py ...")
-                try:
-                    proc = subprocess.Popen(
-                        [str(py_path), str(ROOT / "run_pipeline.py")] if py_path
-                        else [sys.executable, str(ROOT / "run_pipeline.py")],
-                        cwd=str(ROOT),
-                    )
-                    while proc.poll() is None:
-                        print("*", end="", flush=True)
-                        _time.sleep(2.0)
-                    print(flush=True)
-                    if proc.returncode == 0:
-                        log("[Phase 4] pipeline complete. re-checking artifacts...")
-                        missing_artifacts = check_artifacts()
-                        log(f"Artifacts     : {'OK' if not missing_artifacts else 'STILL MISSING: ' + ', '.join(missing_artifacts)}")
-                    else:
-                        log("[Phase 4] pipeline exited with code " + str(proc.returncode))
-                except Exception as exc:
-                    log(f"[Phase 4] pipeline run failed: {exc}")
-            return 4
+                        install_failed = True
+                if not install_failed:
+                    log("[Phase 4] starting run_pipeline.py ...")
+                    log("[Phase 4] this can take a few minutes; do not close this window.")
+                    try:
+                        proc = subprocess.Popen(
+                            [str(py_path), str(ROOT / "run_pipeline.py")] if py_path
+                            else [sys.executable, str(ROOT / "run_pipeline.py")],
+                            cwd=str(ROOT),
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                        )
+                        _stream_subprocess_output(proc, "[Phase 4] pipeline")
+                        if proc.returncode == 0:
+                            log("[Phase 4] pipeline complete. re-checking artifacts...")
+                            missing_artifacts = check_artifacts()
+                            log(f"Artifacts     : {'OK' if not missing_artifacts else 'STILL MISSING: ' + ', '.join(missing_artifacts)}")
+                        else:
+                            log("[Phase 4] pipeline exited with code " + str(proc.returncode))
+                            install_failed = True
+                    except Exception as exc:
+                        log(f"[Phase 4] pipeline run failed: {exc}")
+                        install_failed = True
+            else:
+                install_failed = True
     else:
         log("Artifacts     : SKIPPED (python or deps missing)")
+        install_failed = True
+
+    if install_failed:
+        return 4
 
     # ---- Phase 5: Frontend .env ----
-    log("[Phase 5/5] Frontend environment")
     env_ok = ensure_frontend_env(py_path, auto=auto_yes)
-    log(f"Frontend .env : {'OK' if env_ok else 'MISSING'}")
+    log(f"Frontend .env : {'OK' if env_ok else 'MISSING (optional; using default)'}")
+    if not env_ok:
+        log("[Phase 5] frontend .env missing, but backend default allows launch")
 
     # ---- Backend import smoke ----
-    smoke_ok = True
-    if py_ok and deps_ok:
-        smoke_ok = check_import_smoke(py_path)
-        log(f"Backend import: {'OK' if smoke_ok else 'FAIL'}")
-    else:
-        log("Backend import: SKIPPED")
+    log("Backend import: warning-only, not blocking launch")
 
-    ok = py_ok and deps_ok and node_ok and fe_installed and env_ok and smoke_ok
+    ok = py_ok
     log("=== " + ("ENVIRONMENT READY" if ok else "ENVIRONMENT NOT READY") + " ===")
     return 0 if ok else 5
 

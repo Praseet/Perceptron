@@ -18,13 +18,6 @@ import { getApiClient } from "../../lib/api/client";
 import { KpiTile } from "../../design-system/patterns/kpi-tile";
 import { formatPct } from "../../lib/format";
 
-// Static aggregate. Computed once at module load; the spec is explicit
-// that this is "a static aggregate per the spec" and not a runtime
-// value, so the constant is hardcoded and the calculation is
-// documented for the reviewer who diffs this against src/config.py:
-//   120 + 80 + 220 + 450 + 340 + 100 + 80 = 1,390
-const ATTACKS_GENERATED_TOTAL = 1_390;
-
 export function HeroKpiRow() {
   const status = useQuery({
     queryKey: ["system-status", "hero-kpi"],
@@ -68,7 +61,7 @@ export function HeroKpiRow() {
     );
   }
 
-  const { n_transactions, fraud_rate, pr_auc_test } = status.data;
+  const { n_transactions, fraud_rate, pr_auc_test, n_attacks_generated } = status.data;
   // Phase 12 real-numbers rule: prefer the FULL dataset count when the
   // backend exposes it (n_transactions_total, ~1.06M). n_transactions
   // is the test-split count (~213k) - showing it as "Transactions" on
@@ -85,7 +78,7 @@ export function HeroKpiRow() {
       />
       <KpiTile
         label="Attacks generated"
-        value={ATTACKS_GENERATED_TOTAL}
+        value={n_attacks_generated}
         direction="up-is-good"
         format={(n) => n.toLocaleString("en-US")}
       />

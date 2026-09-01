@@ -51,6 +51,15 @@ frontend/anti-pattern-audit-console.txt
 frontend/*.report.html
 frontend/*.zip
 
+# ===== Frontend scratch/debug debris =====
+frontend/section_H.*.md
+frontend/h65.md
+frontend/h67.md
+frontend/h68.md
+frontend/home-test.html
+frontend/lfs-check*.html
+frontend/afl_phase12_signature_motion_and_polish_v4.md
+
 # ===== Python build / cache =====
 *.egg-info/
 build/
@@ -73,8 +82,11 @@ models_artifacts/isolation_forest_*.csv
 models_artifacts/shap_*.png
 models_artifacts/output/attack_summaries/
 
-# ===== Generated outputs (regenerable) =====
+# ===== Generated outputs / scratch metadata =====
 graphify-out/
+models_artifacts/loop_runs/
+models_artifacts/sweep_report.json
+models_artifacts/metrics_manifest.json
 *.tmp
 
 # ===== Session / personal / agent scratch =====
@@ -95,3 +107,6 @@ cline --id *.txt
 frontend/build.log
 frontend/dev.err
 *.log.*
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/

@@ -1,9 +1,9 @@
 @echo off
 REM ===============================================================
 REM Adversarial Fraud Lab - one-command launcher (Windows)
-REM Runs preflight_check.py --install --yes (auto-installs missing
-REM Python/frontend deps with '*' progress), and only starts the
-REM stack when ENVIRONMENT READY.
+REM Runs preflight_check.py (5-phased check). If only Phase 4
+REM artifacts are missing, it reruns only Phase 4 with install.
+REM Otherwise it installs the missing phases.
 REM Stop with: stop.cmd
 REM ===============================================================
 setlocal enabledelayedexpansion
@@ -30,19 +30,18 @@ if exist "%ROOT%.venv\Scripts\python.exe" (
 ) else (
     py -3 "%ROOT%preflight_check.py"
 )
-if errorlevel 1 goto :need_fix
+set "PREFLIGHT_RC=%errorlevel%"
+if %PREFLIGHT_RC%==0 goto :launch
 
-echo [preflight] ENVIRONMENT READY -- starting stack.
-goto :launch
-
-:need_fix
 echo.
 echo [preflight] environment NOT ready. See report above.
-echo [preflight] auto-installing (watch for '*' progress)...
+echo [preflight] auto-installing (this may take a few minutes)...
+set "PHASE4_ARG="
+if %PREFLIGHT_RC%==4 set "PHASE4_ARG=--phase4-only"
 if exist "%ROOT%.venv\Scripts\python.exe" (
-    "%ROOT%.venv\Scripts\python.exe" "%ROOT%preflight_check.py" --install --yes
+    "%ROOT%.venv\Scripts\python.exe" "%ROOT%preflight_check.py" --install --yes %PHASE4_ARG%
 ) else (
-    py -3 "%ROOT%preflight_check.py" --install --yes
+    py -3 "%ROOT%preflight_check.py" --install --yes %PHASE4_ARG%
 )
 if errorlevel 1 (
     echo [preflight] auto-install FAILED or partial.

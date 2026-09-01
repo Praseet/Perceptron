@@ -232,6 +232,9 @@ export interface SystemStatus {
   fraud_rate: number;
   pr_auc_test: number;
   last_retrain_at: string;
+  /** Number of generated attack rows from the raw generation log,
+   *  or 0 when no data is available. */
+  n_attacks_generated: number;
 }
 
 export interface HealthResponse {

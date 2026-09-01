@@ -4,5 +4,6 @@
   "n_transactions": 1064963,
   "fraud_rate": 0.0004,
   "pr_auc_test": 0.9072,
-  "last_retrain_at": "2026-08-29T14:30:00Z"
+  "last_retrain_at": "2026-08-29T14:30:00Z",
+  "n_attacks_generated": 1390
 }
